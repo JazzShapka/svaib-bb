@@ -199,12 +199,20 @@ export default async function plugin(bb: BbPluginApi) {
     const supported = ['codex', 'claude-code'].includes(context.provider.id);
     const base = setup ? account.configure(context) : own ? workplaceConfiguration(context) : { tools: [], skills: [] };
     const finishedSetup = setup && context.pluginMetadata.phase === 'work';
-    const visual = supported && (!setup || finishedSetup) ? screen.configure(context) : { tools: [], skills: [] };
+    // BB freezes tools when constructing the provider session. A metadata-only
+    // setup -> work transition cannot add Screen to that already running session.
+    // Pre-stage only a valid scoped setup; the handlers still authorize the
+    // actual account/company/workspace on every call.
+    const configuredSetup = setup && (base.tools?.length ?? 0) > 0;
+    const visual = supported && (!setup || finishedSetup || configuredSetup) ? screen.configure(context) : { tools: [], skills: [] };
+    const instructions = configuredSetup && base.instructions && visual.instructions
+      ? `${base.instructions}\n\nТолько после connected:true, если согласованный сценарий включает подготовку пространства, продолжи его по правилам пользователя. ${visual.instructions}`
+      : base.instructions;
     return {
       tools: [...new Set([...(base.tools ?? []), ...(visual.tools ?? [])])],
       skills: [...new Set([...(base.skills ?? []), ...(visual.skills ?? []), ...(!setup && supported ? [CONNECTION_SKILL] : [])])],
       // Native/work chats discover available tools without receiving another task's instructions.
-      ...(base.instructions ? { instructions: base.instructions } : {}),
+      ...(instructions ? { instructions } : {}),
     };
   });
   bb.rpc.register(rpcContract, {
