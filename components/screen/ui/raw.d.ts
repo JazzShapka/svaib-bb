@@ -1,0 +1,1 @@
+export type ScaffoldFrameMessage = { type: 'screen-ready' } | { type: 'screen-change' | 'screen-handoff'; config: unknown } | { type: 'screen-resize'; height: unknown };

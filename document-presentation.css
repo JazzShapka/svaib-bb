@@ -1,0 +1,20 @@
+.svb-document-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.svb-document-view--client .svb-document-header { margin-top: 32px; }
+.svb-document-view--client .svb-document-header h1 { font-family: Montserrat, sans-serif; font-size: clamp(27px, 3vw, 42px); font-weight: 650; letter-spacing: -1.1px; }
+.svb-document-provenance { font-size: 11px; color: var(--svb-muted); }
+.svb-document-provenance summary { cursor: pointer; width: fit-content; }
+.svb-document-provenance[open] .svb-document-meta { margin-top: 12px; }
+.svb-document-view--client .svb-document { max-width: none; font-size: 15px; line-height: 1.8; }
+.svb-document-view--client .svb-document h2 { font-family: Montserrat, sans-serif; font-weight: 650; font-size: 23px; line-height: 1.4; margin-top: 32px; margin-bottom: 14px; }
+.svb-document-view--client .svb-document h3 { font-size: 17px; line-height: 1.5; margin-top: 25px; }
+.svb-document-view--client .svb-document p { line-height: 1.8; }
+.svb-document-view--client .svb-document a { color: var(--svb-teal); text-underline-offset: 4px; }
+.svb-document-view--client .svb-document table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 14px; line-height: 1.55; border: 1px solid var(--svb-line); border-radius: 12px; margin: 24px 0; }
+.svb-document-view--client .svb-document th { color: var(--svb-ink); background: var(--svb-soft); font-weight: 650; text-align: left; }
+.svb-document-view--client .svb-document th, .svb-document-view--client .svb-document td { padding: 16px 18px; min-width: 130px; vertical-align: top; border: 0; border-bottom: 1px solid var(--svb-line); }
+.svb-document-view--client .svb-document tr:last-child td { border-bottom: 0; }
+.svb-document-view--client .svb-document tbody tr:nth-child(even) { background: color-mix(in srgb, var(--svb-ink) 2%, var(--svb-bg)); }
+.svb-document-view--presenting { position: fixed; inset: 0; z-index: 1000; overflow: auto; background: var(--svb-bg); padding: 28px max(24px, calc((100vw - 1140px) / 2)) 72px; }
+.svb-document-view--presenting .svb-document-toolbar { position: sticky; top: -28px; background: var(--svb-bg); padding: 18px 0; z-index: 1; }
+.svb-document-view--presenting .svb-document-provenance { display: none; }
+@media (max-width: 600px) { .svb-document-view--client .svb-document { font-size: 14px; } .svb-document-view--client .svb-document th, .svb-document-view--client .svb-document td { padding: 12px; } }

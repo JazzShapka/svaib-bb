@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "version": "4.3.1",
+  "canonSnapshot": "5123c253fa31",
+  "templates": [
+    {
+      "path": "templates/aspects/01_strategic/goal.md",
+      "sha256": "fa8d542dff6016a0468b8a9f0bc9d994a9d55eec565c68572396f10601a8e2a4"
+    },
+    {
+      "path": "templates/aspects/01_strategic/strategy.md",
+      "sha256": "2ef4ec4cb8ed6fe864eebe809270d696bf18109680247f882ff2519410623f60"
+    },
+    {
+      "path": "templates/aspects/01_strategic/vision.md",
+      "sha256": "0c3f61ebd2ee73aab8f7afa94e1c51f0c9881cb2db8d133fa5796fdf878cd0e5"
+    },
+    {
+      "path": "templates/aspects/02_team/01_org-structure.md",
+      "sha256": "66fd3df7ccfa54458fdd97fefdf40b6f9919c2694b610aeb42ccf7ace9e53f63"
+    },
+    {
+      "path": "templates/aspects/02_team/person.md",
+      "sha256": "421f113cff6bb036fe6e4a912bb6bd1d7a1bb8491ca93620f3d06c787b64da09"
+    },
+    {
+      "path": "templates/aspects/03_metrics/domain-metrics.md",
+      "sha256": "e69cc4925153a523a7784c21f3ae35801bb147dfd95781197e815363c74678cb"
+    },
+    {
+      "path": "templates/aspects/03_metrics/extractors/README.md",
+      "sha256": "67c28539ce0271cf171c406019190f6cec3efd2d29ba682bae26b155a1ee5209"
+    },
+    {
+      "path": "templates/aspects/03_metrics/README.md",
+      "sha256": "09a5735250a3dd7d55b7a6bdf01c44fac40283bb0a301a8233f79febc40a0d16"
+    },
+    {
+      "path": "templates/aspects/03_metrics/source/README.md",
+      "sha256": "d562c46ae0a982e027f76c26323c8a1b353cfe3731ead0aeb9f5b44e13115773"
+    },
+    {
+      "path": "templates/aspects/knowledge/README.md",
+      "sha256": "13f62741bbe9e977529313d53f5f979b8a160341dc7882200316a0391471f02a"
+    },
+    {
+      "path": "templates/aspects/processes/process.md",
+      "sha256": "920939a9a40ea06118e398db09c8c9b899c87c5800b45a16ff0bdad1a3981034"
+    },
+    {
+      "path": "templates/aspects/processes/README.md",
+      "sha256": "b71a2b772ed556ef8bc780e866ae9006701472fdc63697a300dde07d68e945a3"
+    },
+    {
+      "path": "templates/aspects/projects/README.md",
+      "sha256": "6faf100b960edd69efbe133a8576d2fcb0953d7843dcd4129bdd4c0373429c6e"
+    },
+    {
+      "path": "templates/infrastructure/_inbox/README.md",
+      "sha256": "2c726e4a190f1a08ed0c3791f93969f1a158d24bec4ce775a389986ea34c58a3"
+    },
+    {
+      "path": "templates/infrastructure/README.md",
+      "sha256": "afdf4e69e6e95bef67630433431cfc17d82a974af0038d535d252f7a3a9570d7"
+    },
+    {
+      "path": "templates/infrastructure/zz_archive/README.md",
+      "sha256": "e0a668adea54c7deabf4625680806371b7c92a96f414ef4808d754b9967f5ff3"
+    },
+    {
+      "path": "templates/management-kit/01_overview.md",
+      "sha256": "af193e26c0c8f86464d3bab95f58663f90ce0cbcc641d958fd8a933295e79881"
+    },
+    {
+      "path": "templates/management-kit/02_active.md",
+      "sha256": "bb8ee1f3065a842f5f0a5f0dd1bb0be744163536c1d663fd974cc8c5b9981f66"
+    },
+    {
+      "path": "templates/management-kit/03_backlog.md",
+      "sha256": "7b41f91b060ed6ba3c4da21b70160398f064acfafd7366c1501367800ec48661"
+    },
+    {
+      "path": "templates/management-kit/04_progress.md",
+      "sha256": "f1358ccfb07caa718ee3b76b29ec1e9baa96b0d74875b80c98306ffb3d9893ef"
+    },
+    {
+      "path": "templates/management-kit/05_decisions.md",
+      "sha256": "bd822c08222b1eb6c6c5e5faa929e50e5accdd5c6b10c6b0212da0231a1eb1ee"
+    },
+    {
+      "path": "templates/meetings/README.md",
+      "sha256": "15215aedf8afc65fb845d44817d1ea90e654b2f32b91a000cb2ea4ebfe3164cf"
+    },
+    {
+      "path": "templates/nodes/ceo/01_profile.md",
+      "sha256": "05a7ddea5a562dc62ab13f5420385a85c767226cec06c83bc39810d86f89a2d6"
+    },
+    {
+      "path": "templates/nodes/ceo/02_active.md",
+      "sha256": "cb7f1b32c1e0286461f483e9551d6cf73f431b5a43165a8ec047a8607464fa48"
+    },
+    {
+      "path": "templates/nodes/ceo/03_thoughts.md",
+      "sha256": "98eb6cb7fc29aabae0f9cdff6ce8fd4314b3cfd02a936f373c1195bd066c679f"
+    },
+    {
+      "path": "templates/nodes/ceo/04_decisions.md",
+      "sha256": "27bcfce099d6895330ecc34f6a8e3094e7624349fee2e6ddf1ad871106cd2c2c"
+    },
+    {
+      "path": "templates/nodes/ceo/README.md",
+      "sha256": "347eee604731712018df48c37dd1fa44683a9b69b1b49eee2103724f1ee10d77"
+    },
+    {
+      "path": "templates/nodes/clients/client-name/company.md",
+      "sha256": "6aafee04444d0564888dedeb46f8cff0b0b4dcd346c837049d466c484fe81631"
+    },
+    {
+      "path": "templates/nodes/clients/client-name/people.md",
+      "sha256": "4dda7630e812724b32224f9d280b560431754469e6409866489b715b02445a62"
+    },
+    {
+      "path": "templates/nodes/clients/client-name/README.md",
+      "sha256": "ef072f8b2a90d2019c34e870089135dd74aafde08b786b611645f0287f219c42"
+    },
+    {
+      "path": "templates/nodes/clients/README.md",
+      "sha256": "92a20ee25f40ca549c9df652a2e371d73dc7a0fe4852aad2804863fd78173761"
+    },
+    {
+      "path": "templates/nodes/product/profile.md",
+      "sha256": "d8132da8460d157f8b0733fc85fbbde400c692196249855160ee92deef803613"
+    },
+    {
+      "path": "templates/nodes/product/README.md",
+      "sha256": "f732d4aeba6498296592bff59174694dc5c09ca9d605a8b2474e29f15e58834c"
+    },
+    {
+      "path": "templates/nodes/unit/README.md",
+      "sha256": "ae73e2e31cc0495bf613a320ed891a69b59be3595bab9e6790d6c24a3277e0c6"
+    },
+    {
+      "path": "templates/README.md",
+      "sha256": "f384703fef5b1806a123c030272af7479ccb1307c6f6ef50888540b1a9055eb0"
+    },
+    {
+      "path": "templates/root/_inbox/README.md",
+      "sha256": "6761b1523106b1cbe46b7c50c3d7e0933967d8c7f560c7c448905ed418b429af"
+    },
+    {
+      "path": "templates/root/.svaib/findings.md",
+      "sha256": "aec597c96ec29d9111f3bbe7ab09508153f726299ec29add5f8854e0f706450e"
+    },
+    {
+      "path": "templates/root/.svaib/README.md",
+      "sha256": "703236c11ef14ad40ae72ec2c44a3602c36208440e07d49a1f3608fc0c76a681"
+    },
+    {
+      "path": "templates/root/.svaib/usage/README.md",
+      "sha256": "40a1fe7e34a1bbe99af5ec6f17fc6de2a08ca880b5211e10dd3e69d723db2807"
+    },
+    {
+      "path": "templates/root/01_company/_inbox/README.md",
+      "sha256": "6e26e7aa2f502db9cb6850e1269c160aa85594e6ea67971fc2471fcea8155d41"
+    },
+    {
+      "path": "templates/root/01_company/01_strategic/goal.md",
+      "sha256": "d06b94ee76399298e1b4187a31fa4fbedc13b0adc2aaeccefe56a012c162c803"
+    },
+    {
+      "path": "templates/root/01_company/01_strategic/vision.md",
+      "sha256": "365344756a73321bab086ef4e25667af2808bd762af3d830e990d19cffbaddc4"
+    },
+    {
+      "path": "templates/root/01_company/02_team/01_org-structure.md",
+      "sha256": "33919a4cd1bb2ca12f75d1fbccf89a45c47b014185de890ac084c2070ea70e76"
+    },
+    {
+      "path": "templates/root/01_company/03_metrics/business-metrics.md",
+      "sha256": "c55a370365532aa497b4cbf9678bda9278e23cad2b54c24559f5ab085db7ba12"
+    },
+    {
+      "path": "templates/root/01_company/03_metrics/README.md",
+      "sha256": "5e4fc063a0cb2f525865182b8fe8e4a57ba4ea1af92bd19fb180617822f36dce"
+    },
+    {
+      "path": "templates/root/01_company/operating-model.md",
+      "sha256": "1c8f2a874e71da7ccc7c8b2aa9c37b0ca970f53bb2cec3fcc74c7c84459da676"
+    },
+    {
+      "path": "templates/root/01_company/README.md",
+      "sha256": "8395c3463077f428712dba8b18839093249b5e74c3bfeccf0779fe765ee5b976"
+    },
+    {
+      "path": "templates/root/01_company/zz_archive/README.md",
+      "sha256": "640a24784f296b1813baf0d6c73e1c74c73d9c96d9b630316900d66e7bd89fdc"
+    },
+    {
+      "path": "templates/root/AGENTS.md",
+      "sha256": "2b0d21c827ab196f3f63e4450d2c6f3de7565607189897d932374e0a2183f236"
+    },
+    {
+      "path": "templates/root/CLAUDE.md",
+      "sha256": "91c52a2e4f2117022a30bf7e0534c398298ddb7ad93ccef0d83e67ed9af6e88a"
+    },
+    {
+      "path": "templates/root/README.md",
+      "sha256": "594a5dc25f23c9772d25d97357d4f16830de8377d270bb81a0a91de15142e118"
+    },
+    {
+      "path": "templates/root/zz_archive/README.md",
+      "sha256": "7fb7c1f355ec53883b99e193fee4068097c7e6dadec561e0be67a4c6d9123f8c"
+    },
+    {
+      "path": "templates/semantic-files/architecture.md",
+      "sha256": "aa8595258d58eb1e9cec5769e06b0f2c79a4622663b911641ed1a3d1332e5b1c"
+    },
+    {
+      "path": "templates/semantic-files/glossary.md",
+      "sha256": "b529ef64a7cdc0aa52cbf3956c38185587d9a5f3c4a908c52a9c7425cd0dc173"
+    },
+    {
+      "path": "templates/semantic-files/profile.md",
+      "sha256": "08c7a7cdf6cbd5e7e6a803dae2f3c64e28ade99edea9a16b65ab8b973ebacf42"
+    },
+    {
+      "path": "templates/semantic-files/setup.md",
+      "sha256": "5c7e7e9dde7fbb1b048115752ac96750bcb59e51f115b8d819c879a6a0268492"
+    },
+    {
+      "path": "templates/semantic-files/speech-aliases.md",
+      "sha256": "673a348867a9e7453706bb085913f52b2de2c5c1a356d7144f302e158f763708"
+    }
+  ]
+}

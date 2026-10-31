@@ -1,0 +1,23 @@
+.svaib-account-viewport { width: 100%; height: 100%; min-width: 0; min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+.svaib-account { box-sizing: border-box; width: 100%; max-width: 840px; margin: 0 auto; padding: 40px 28px; color: var(--foreground); font-family: Inter, sans-serif; line-height: 1.6; }
+.svaib-account header { display: flex; align-items: center; gap: 20px; margin-bottom: 24px; }
+.svaib-account-mark { font-size: 58px; font-weight: 800; color: #00b4a6; letter-spacing: -7px; }
+.svaib-account h1 { font-size: 30px; line-height: 1.2; margin: 2px 0; }
+.svaib-account h2 { font-size: 19px; margin: 0 0 12px; }
+.svaib-account p { margin: 8px 0; }
+.svaib-account section { padding: 24px; margin: 18px 0; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 14px; }
+.svaib-account-eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; opacity: .65; }
+.svaib-account-note { font-size: 13px; opacity: .7; }
+.svaib-account-button, .svaib-account-link { display: inline-block; padding: 9px 16px; border-radius: 9px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); background: transparent; color: inherit; cursor: pointer; font: inherit; margin: 4px 8px 4px 0; }
+.svaib-account-link { background: #00b4a6; color: #071e24; font-weight: 650; text-decoration: none; }
+.svaib-account-button:disabled { opacity: .45; cursor: wait; }
+.svaib-account-error { border-left: 3px solid #ff4d8d; padding: 12px; }
+.svaib-account-toggle { display: flex; gap: 12px; align-items: center; }
+.svaib-account-toggle input { width: 18px; height: 18px; accent-color: #00b4a6; }
+.svaib-account-workspace { border-color: #00b4a6 !important; }
+.svaib-account-path { overflow-wrap: anywhere; }
+.svaib-account-company { display: grid; gap: 8px; margin: 14px 0; }
+.svaib-account-company select { max-width: 100%; padding: 8px; font: inherit; color: inherit; background: var(--background); border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 8px; }
+.svaib-account footer { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 0; }
+.svaib-account .svaib-account-primary { background: #00b4a6; color: #071e24; font-weight: 650; }
+@media (max-width: 600px) { .svaib-account { padding: 24px 16px; } .svaib-account h1 { font-size: 24px; } }

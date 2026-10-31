@@ -1,0 +1,75 @@
+{
+  "name": "bb-plugin-svaib-screen-pilot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "bb": ">=0.48.0",
+    "bbPluginSdk": ">=0.6.94 <0.7"
+  },
+  "bb": {
+    "name": "Screen · пилот svaib",
+    "description": "Изолированный компонентный Screen на вымышленных данных.",
+    "branding": {
+      "icon": "PanelsTopLeft"
+    },
+    "server": "./bb/server.ts",
+    "app": "./bb/app.tsx",
+    "skills": [
+      "bb/skills"
+    ]
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "mcp": "tsx src/mcp.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build && vite build --mode mcp",
+    "test": "tsx --test tests/*.test.ts",
+    "prebuild": "node scripts/prepare-ui.mjs",
+    "pretypecheck": "node scripts/prepare-ui.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.1.2",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "echarts": "6.1.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.94",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "playwright": "^1.60.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.0",
+    "vite": "^7.0.0",
+    "vite-plugin-singlefile": "^2.3.0"
+  },
+  "exports": {
+    "./model": "./src/model.ts",
+    "./renderer": "./ui/ScreenRenderer.tsx",
+    "./scaffold": "./src/scaffold.ts",
+    "./agent-session": "./src/agent-session.ts"
+  },
+  "files": [
+    "bb",
+    "src/client.ts",
+    "src/store.ts",
+    "src/sse.ts",
+    "src/model.ts",
+    "src/scaffold.ts",
+    "src/scaffold-tree.ts",
+    "src/scaffold-tree-model.ts",
+    "src/scaffold-catalog.json",
+    "ui/ScreenRenderer.tsx",
+    "ui/ScaffoldEditor.tsx",
+    "ui/scaffold-tree.ts",
+    "ui/raw.d.ts",
+    "ui/screen.css",
+    "ui/scaffold-source.json",
+    "ui/scaffold-site.css",
+    "src/agent-session.ts"
+  ]
+}
