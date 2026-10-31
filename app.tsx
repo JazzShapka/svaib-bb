@@ -163,7 +163,13 @@ function ActionSetup({ workspace, action, context, backLabel, onBack, onStarted 
 type View = Place | { kind: "source"; sourceId: string; returnTo: Place } | { kind: "action"; action: Action; context?: ActionContext; returnTo: Place } | { kind: "thread"; threadId: string; title: string; returnTo: Place; metricsRefresh?: boolean };
 function EmptyWorkspaces() {
   const navigate = useBbNavigate();
-  return <section className="svb-empty" role="status"><Glyph name="Layers" /><h2>Продолжим настройку рабочего места</h2><p>Подключи партнёра и пройди онбординг своей компании.</p><button className="svb-primary-button" onClick={() => navigate.toPluginPanel('account')}>Подключить svaib<Glyph name="ArrowUpRight" /></button></section>;
+  return <section className="svb-empty" role="status"><Glyph name="Layers" /><h2>Продолжим настройку рабочего места</h2><p>Подключи партнёра и пройди онбординг своей компании.</p><button className="svb-primary-button" onClick={() => navigate.toPluginPanel('workplace', { subPath: 'settings/account' })}>Подключить svaib<Glyph name="ArrowUpRight" /></button></section>;
+}
+function WorkplaceRouter({ subPath = '' }: PluginNavPanelProps) {
+  if (subPath === 'settings/account' || subPath.startsWith('settings/account/')) {
+    return <AccountRouter subPath={subPath.slice('settings/account'.length).replace(/^\//, '')} production />;
+  }
+  return <WorkplacePage subPath={subPath} />;
 }
 function WorkplacePage({ subPath = "" }: Partial<PluginNavPanelProps>) {
   const { data, error, refresh } = useOverview();
@@ -191,7 +197,7 @@ function WorkplacePage({ subPath = "" }: Partial<PluginNavPanelProps>) {
   } : null;
   if (data && !error && data.workspaces.length === 0) return <AccountPage production />;
   return <div className={`svb svb-workplace${view.kind === "thread" ? " svb-workplace-chat" : ""}`}>
-    <nav className="svb-contexts" aria-label="Рабочие контексты"><div className="svb-context-tabs">{data?.workspaces.map(item => <button key={item.id} className={workspace?.id === item.id ? "is-active" : ""} aria-current={workspace?.id === item.id ? "page" : undefined} onClick={() => { go({ kind: "overview" }); navigate.toPluginPanel("workplace", { subPath: item.id }); }}>{item.tabColor && <span className={`svb-tab-dot svb-tab-dot--${item.tabColor}`} aria-hidden="true" />}{item.name}</button>)}<button onClick={() => navigate.toPluginPanel('account')}>Аккаунт svaib</button></div></nav>
+    <nav className="svb-contexts" aria-label="Рабочие контексты"><div className="svb-context-tabs">{data?.workspaces.map(item => <button key={item.id} className={workspace?.id === item.id ? "is-active" : ""} aria-current={workspace?.id === item.id ? "page" : undefined} onClick={() => { go({ kind: "overview" }); navigate.toPluginPanel("workplace", { subPath: item.id }); }}>{item.tabColor && <span className={`svb-tab-dot svb-tab-dot--${item.tabColor}`} aria-hidden="true" />}{item.name}</button>)}<button onClick={() => navigate.toPluginPanel('workplace', { subPath: 'settings/account' })}>Аккаунт svaib</button></div></nav>
     {view.kind === "thread" && workspace ? <div className="svb-conversation"><div className="svb-conversation-heading"><button className="svb-back" onClick={() => { refresh(); go(view.returnTo); }}><Glyph name="ArrowLeft" />{view.metricsRefresh ? "К графикам" : placeLabel(view.returnTo, workspace)}</button><span>{view.title}</span><button className="svb-text-button" onClick={() => navigate.toThread(view.threadId)}>Открыть разговор<Glyph name="ArrowUpRight" /></button></div><ThreadChat threadId={view.threadId} variant="full" layout="contained" permissionPolicy="inherit" className="svb-thread-chat" /></div> : <div className="svb-scroll" ref={scroll}><div className="svb-page">
       {data && error && <Feedback error={error} retry={refresh} />}
       {!data ? <Feedback error={error} retry={refresh} /> : !workspace || !handlers ? <EmptyWorkspaces /> : view.kind === "source" ? <SourceView key={`${workspace.id}/${view.sourceId}`} workspaceId={workspace.id} sourceId={view.sourceId} backLabel={workspace.clientHub ? "К клиентам" : placeLabel(view.returnTo, workspace)} onBack={() => go(view.returnTo)} presentation={Boolean(workspace.clientHub)} sources={workspace.sources} onSource={handlers.onSource} /> : view.kind === "action" ? <ActionSetup key={`${workspace.id}/${view.action.id}/${view.context?.aspectId ?? ""}/${view.context?.itemId ?? ""}`} workspace={workspace} action={view.action} context={view.context} backLabel={placeLabel(view.returnTo, workspace)} onBack={() => go(view.returnTo)} onStarted={(threadId, title) => go({ kind: "thread", threadId, title, returnTo: view.action.effect === "metrics-refresh" ? { kind: "aspect", aspectId: "metrics" } : view.returnTo, metricsRefresh: view.action.effect === "metrics-refresh" })} /> : workspace.clientHub ? <ClientHubPage {...handlers} guideOpen={clientGuides[workspace.id] ?? false} onGuideToggle={open => setClientGuides(previous => ({ ...previous, [workspace.id]: open }))} /> : workspace.personal ? (
@@ -230,8 +236,7 @@ function FixedContextPanel(props: PluginNavPanelProps) {
 export default definePluginApp(app => {
   app.experimental_icons.register({ name: "svaib-workplace/brand", component: ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true"><text x="2" y="20" fontFamily="Montserrat, Inter, sans-serif" fontSize="25" fontWeight="800" fill="var(--svb-teal, #00B4A6)">s</text><circle cx="21" cy="19.5" r="2" fill="#FF4D8D"/></svg> });
   app.experimental_icons.register({ name: "svaib-workplace/compass", component: ({className}) => <Glyph name="Compass" className={className} /> });
-  app.slots.navPanel({ id: "workplace", path: "workplace", title: "svaib", icon: "svaib-workplace/brand", component: WorkplacePage });
-  app.slots.navPanel({ id: 'account', path: 'account', title: 'Мой svaib', icon: 'UserRound', component: props => <AccountRouter {...props} production /> });
+  app.slots.navPanel({ id: "workplace", path: "workplace", title: "svaib", icon: "svaib-workplace/brand", component: WorkplaceRouter });
   app.slots.experimental_tab({ ...contextTab, title: "Контекст", icon: "svaib-workplace/compass", component: FixedContextPanel, layout: "flush" });
   app.slots.homepageSection({ id: "workplace-home", title: "svaib · рабочее место", component: HomeSection });
   app.slots.experimental_tab({ context: { kind: "thread" }, availability: "action", id: "svaib-context", title: "Контекст svaib", icon: "svaib-workplace/compass", component: () => <ContextPanel />, layout: "flush" });

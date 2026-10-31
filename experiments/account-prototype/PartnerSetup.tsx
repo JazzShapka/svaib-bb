@@ -4,7 +4,7 @@ import type { rpcContract } from './server';
 import { connectionCompose } from './connection';
 
 /** Old plugin links remain valid, but conversation UI belongs to BB. */
-export function PartnerSetup({ phase, threadId }: { phase: 'setup' | 'chat' | 'verify'; threadId?: string }) {
+export function PartnerSetup({ phase, threadId, production = false }: { phase: 'setup' | 'chat' | 'verify'; threadId?: string; production?: boolean }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const context = useBbContext();
@@ -26,6 +26,6 @@ export function PartnerSetup({ phase, threadId }: { phase: 'setup' | 'chat' | 'v
   return <div className="svaib-account-viewport"><main className="svaib-account">
     <p role={error ? 'alert' : 'status'}>{error || 'Перехожу в чат BB…'}</p>
     {error && <button className="svaib-account-button" onClick={() => setAttempt(n => n + 1)}>Повторить</button>}
-    <button className="svaib-account-button" onClick={() => navigate.toPluginPanel('account')}>К рабочему месту</button>
+    <button className="svaib-account-button" onClick={() => production ? navigate.toPluginPanel('workplace', { subPath: 'settings/account' }) : navigate.toPluginPanel('account')}>К рабочему месту</button>
   </main></div>;
 }

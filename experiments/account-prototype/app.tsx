@@ -66,7 +66,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
         <p>{connection.verification === 'signed-grants' ? 'Два входа svaib проверены для этого подключения.' : 'Партнёр и аккаунт подключены.'} Можно продолжить разговор и онбординг.</p>
         <button className="svaib-account-button svaib-account-primary" disabled={busy} onClick={() => void act(openConnection)}>К партнёру</button>
       </> : <>
-        <p>Агент подключит аккаунт и партнёра, проверит нужное расширение и два входа. Тебе останется подтвердить вход в браузере.</p>
+        <p>Агент подготовит svaib к работе. Тебе останется подтвердить вход в браузере.</p>
         {connection?.message && <p role="status">{connection.message}</p>}
         <button className="svaib-account-button svaib-account-primary" disabled={busy || !connection} onClick={() => void act(openConnection)}>{['setup', 'verify', 'cabinet'].includes(connection?.stage ?? '') ? 'Открыть подключение' : connection?.stage === 'error' ? 'Продолжить подключение' : 'Подключить svaib'}</button>
       </>}
@@ -121,5 +121,5 @@ export function AccountRouter({ subPath, production = false }: PluginNavPanelPro
   const match = /^(connect|verify)(?:\/(thr_[a-z0-9]+))?$/.exec(subPath);
   if (!match) return <AccountPage production={production} />;
   if (match[1] === 'verify' && !match[2]) return <AccountPage production={production} />;
-  return <PartnerSetup key={subPath} phase={match[1] === 'verify' ? 'verify' : match[2] ? 'chat' : 'setup'} threadId={match[2]} />;
+  return <PartnerSetup key={subPath} production={production} phase={match[1] === 'verify' ? 'verify' : match[2] ? 'chat' : 'setup'} threadId={match[2]} />;
 }

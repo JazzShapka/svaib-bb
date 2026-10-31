@@ -20,6 +20,8 @@ export const SVAIB_OAUTH: OAuthEndpoints = {
 };
 export const PRODUCTION_SCOPES = ['profile:read', 'profile:write', 'company:read', 'company:write', 'workspace:read', 'workspace:write', 'offline_access'] as const;
 const LEGACY_SCOPES = 'profile:read profile:write offline_access';
+// Browser confirmation belongs to the connection, not to an agent turn or tool timeout.
+export const OAUTH_CONFIRMATION_MS = 30 * 60_000;
 
 /** A separate binding prevents old staging or profile-only grants being reused. */
 export function productionOAuth(): OAuthEndpoints {
@@ -33,18 +35,19 @@ const tokenSchema = z.object({
 });
 interface Pending { state: string; verifier: string; redirect: string; clientId: string; server: Server; timer: ReturnType<typeof setTimeout>; generation: number }
 
-function finishPage(response: ServerResponse, ok: boolean) {
-  response.writeHead(ok ? 200 : 400, {
+function finishPage(response: ServerResponse, ok: boolean, expired = false) {
+  response.writeHead(expired ? 410 : ok ? 200 : 400, {
     'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
     'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
     'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer',
   });
-  response.end(`<!doctype html><html lang="ru"><meta charset="utf-8"><title>svaib</title><h1>${ok ? 'Вход выполнен' : 'Вход не завершён'}</h1><p>${ok ? 'Вернись в BB. Это окно можно закрыть.' : 'Вернись в BB и начни вход заново.'}</p></html>`);
+  response.end(`<!doctype html><html lang="ru"><meta charset="utf-8"><title>svaib</title><h1>${ok ? 'Вход выполнен' : expired ? 'Время входа истекло' : 'Вход не завершён'}</h1><p>${ok ? 'Вернись в BB. Это окно можно закрыть.' : 'Вернись в BB на страницу svaib и нажми «Продолжить подключение». Уже работающие входы сохранятся.'}</p></html>`);
 }
 
 /** One account per local BB server. No credentials ever leave this backend. */
 export class OAuthConnection {
   private pending: Pending | null = null;
+  private expired: Server | null = null;
   private generation = 0;
   private refresh: Promise<string | null> | null = null;
   private disposed = false;
@@ -137,7 +140,11 @@ export class OAuthConnection {
     this.error = '';
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(48).toString('base64url');
+    // Explicit retry retires the old recovery page, including a configured fixed port.
+    this.closeExpired();
     const server = createServer((request, response) => {
+      // A callback from an expired listener can never consume a newer request.
+      if (generation !== this.generation) { finishPage(response, false, true); return; }
       void this.callback(request.url ?? '', request.headers.host ?? '', response).catch(() => {
         if (!response.headersSent) finishPage(response, false);
       });
@@ -150,9 +157,15 @@ export class OAuthConnection {
     const redirect = `http://127.0.0.1:${address.port}/callback`;
     const timer = setTimeout(() => {
       if (this.pending?.generation === generation) {
-        this.cancel(); this.error = 'Время входа истекло. Начни вход заново.'; this.notify();
+        this.pending = null;
+        ++this.generation;
+        // Bound resources by count, not time: one credential-free recovery page
+        // remains reachable until explicit retry/cancel/dispose, even after a long pause.
+        this.closeExpired();
+        this.expired = server;
+        this.error = 'Время входа истекло. Нажми «Продолжить подключение» на странице svaib в BB.'; this.notify();
       }
-    }, 10 * 60_000);
+    }, OAUTH_CONFIRMATION_MS);
     timer.unref(); server.unref();
     this.pending = { state, verifier, redirect, clientId: '', server, timer, generation };
     try {
@@ -220,7 +233,12 @@ export class OAuthConnection {
   cancel() {
     ++this.generation; this.refresh = null; this.exchanging = null;
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.server.close(); this.pending = null; }
+    this.closeExpired();
     this.notify();
+  }
+
+  private closeExpired() {
+    if (this.expired) { this.expired.close(); this.expired = null; }
   }
 
   async logout(): Promise<{ revoked: boolean }> {

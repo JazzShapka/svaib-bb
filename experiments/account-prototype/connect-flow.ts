@@ -109,6 +109,17 @@ export class ConnectFlow {
   }
   async view(): Promise<ConnectFlowView> {
     await this.reconcileThread();
+    if (this.state.stage === 'cabinet' && this.pendingCabinet) {
+      const owner = this.pendingCabinet;
+      const epoch = this.d.epoch();
+      const account = await this.d.account();
+      if (this.pendingCabinet === owner && this.state.runId === owner.runId && this.state.threadId === owner.threadId &&
+          account.state === 'signed-out' && this.d.epoch() === epoch) {
+        await this.save({ stage: 'error', retryable: true,
+          message: 'Вход не завершён или время ожидания истекло. Нажми «Продолжить подключение»: повторится только незавершённый вход кабинета.' },
+        () => this.pendingCabinet === owner && this.state.runId === owner.runId && this.state.threadId === owner.threadId && this.d.epoch() === epoch);
+      }
+    }
     if (this.provisionalReady?.runId === this.state.runId && this.provisionalReady.threadId === this.state.threadId) {
       return structuredClone(this.provisionalReady.previous);
     }
@@ -389,15 +400,22 @@ export class ConnectFlow {
 
   async waitForMcp(terminalId: string, ctx: PluginAgentToolContext) {
     const { binding } = await this.caller(ctx);
+    const runId = this.state.runId, epoch = this.d.epoch();
     const env = await this.d.sdk.environments.get({ environmentId: binding.environmentId });
     const signal = AbortSignal.any([ctx.signal, this.disposed.signal]);
+    const current = () => !signal.aborted && this.state.runId === runId && this.state.threadId === ctx.threadId && this.d.epoch() === epoch;
     const deadline = Date.now() + (this.d.waitSliceMs ?? 20_000);
     do {
       signal.throwIfAborted();
       const terminal = await this.d.sdk.terminals.get({ terminalId });
       if (terminal.hostId !== binding.hostId || terminal.initialCwd !== env.path) throw new Error('Терминал входа относится к другому рабочему месту.');
+      if (!current()) throw new Error('Подключение изменилось.');
       if (terminal.status !== 'running') {
-        if (terminal.exitCode !== 0) throw new Error('Вход партнёра не завершился. Запусти только этот незавершённый шаг заново.');
+        if (terminal.exitCode !== 0) {
+          const message = 'Процесс входа партнёра завершился без подтверждения. Нажми «Продолжить подключение» на странице svaib в BB: повторится только незавершённый вход партнёра. Уже работающий вход кабинета сохранён.';
+          await this.save({ stage: 'error', retryable: true, message }, current);
+          throw new Error(message);
+        }
         return this.freshVerification(ctx);
       }
       await new Promise<void>((resolve, reject) => {
