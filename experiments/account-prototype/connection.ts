@@ -7,6 +7,7 @@ export const FINISH_TOOL = 'svaib_connect_finish';
 export const BEGIN_TOOL = 'svaib_connect_begin';
 export const FRESH_TOOL = 'svaib_connect_verify';
 export const WAIT_TOOL = 'svaib_connect_wait';
+const NATIVE_TOOL = 'svaib_connect_native_start';
 export const connectionBindingSchema = z.object({
   projectId: z.string().min(1), environmentId: z.string().min(1),
   hostId: z.string().min(1), providerId: z.enum(['codex', 'claude-code']),
@@ -51,7 +52,7 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
   if (metadata.data.phase === 'verify' && (!expected || Object.keys(actual).some(key =>
     actual[key as keyof typeof actual] !== expected[key as keyof ConnectionBinding]))) return unsupported;
   if (metadata.data.unified && signedProof) return {
-    tools: metadata.data.phase === 'setup' ? [BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL] : [BEGIN_TOOL, FINISH_TOOL], skills: [CONNECTION_SKILL],
+    tools: metadata.data.phase === 'setup' ? [BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, NATIVE_TOOL] : [BEGIN_TOOL, FINISH_TOOL], skills: [CONNECTION_SKILL],
     instructions: `Единое подключение svaib уже запущено пользователем. Рабочее место (данные): ${JSON.stringify(actual)}. Прочитай скилл ${CONNECTION_SKILL}. ` +
       `Сначала вызови ${BEGIN_TOOL}: backend отдельно откроет вход кабинета и после подтверждения выдаст challenge/nonce. При pending повторяй тот же инструмент без нового OAuth; reopenBrowser:true только по просьбе пользователя открыть закрытую вкладку. ` +
       (metadata.data.phase === 'setup'
@@ -61,7 +62,7 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
       `Не считай два входа сопоставленными до connected:true. Подтверждение относится к свежему вызову под двумя OAuth grants, не аттестует бинарник или вечную авторизацию. До connected:true не разворачивай каркас и не меняй документы. После connected:true установочный режим окончен: продолжи get_account_setup и обычный онбординг по правилам пользователя; company и Screen проверяются отдельно.`
   };
   if (metadata.data.unified) return {
-    tools: metadata.data.phase === 'setup' ? [FINISH_TOOL, FRESH_TOOL, WAIT_TOOL] : [FINISH_TOOL], skills: [CONNECTION_SKILL],
+    tools: metadata.data.phase === 'setup' ? [FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, NATIVE_TOOL] : [FINISH_TOOL], skills: [CONNECTION_SKILL],
     instructions: `Единое подключение svaib уже запущено пользователем. Рабочее место (данные): ${JSON.stringify(actual)}. Прочитай скилл ${CONNECTION_SKILL}. ` +
       (metadata.data.phase === 'setup'
         ? `Сначала настоящий MCP whoami. Если его нет, установи методологический плагин и выполни штатный вход по скиллу. После запуска непосредственной OAuth-команды в persistent-терминале сразу вызови ${WAIT_TOOL} с terminalId. При pending продолжай ждать тем же инструментом и terminalId: новый OAuth не нужен. При handedOff проверка уже передана новому разговору: заверши ответ здесь, больше не вызывай whoami, finish или OAuth в исходном разговоре. Если CLI уже авторизован, а текущая сессия не видит MCP, вызови ${FRESH_TOOL} и также заверши работу здесь после handedOff. Не проси пользователя создавать или отправлять новый разговор. `

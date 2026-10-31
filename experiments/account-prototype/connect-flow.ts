@@ -4,6 +4,8 @@ import { z } from 'zod';
 import type { PluginBbSdk, PluginKvStorage, PluginAgentToolContext } from '@get-bb/plugin-sdk';
 import { accountIdentity, type AccountView } from './contracts';
 import { connectionBindingSchema, connectionMetadataSchema } from './connection';
+import { OAuthBeginError } from './oauth';
+import { NativeLogin, nativeStartSchema } from './native-login';
 import { readWhoamiProof, type NativeProofReader } from './whoami-proof';
 import { challengeSchema, checkProofTime, nativePairingAnchor, opaqueProof, verifiedProofSchema,
   type WorkplaceProofPort, type WorkplaceChallenge } from './workplace-proof';
@@ -16,7 +18,7 @@ export const flowSchema = z.object({
   verification: z.enum(['native-timeline', 'signed-grants']).optional(),
 }).strict();
 export type ConnectFlowView = z.infer<typeof flowSchema>;
-export const startFlowSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().min(1).nullable() }).strict();
+export const startFlowSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().min(1).nullable(), restartCabinet: z.boolean().optional() }).strict();
 const empty = (): ConnectFlowView => ({ stage: 'idle', runId: '', threadId: null, binding: null, subject: null, message: '', retryable: false });
 const key = 'connection-flow-v1';
 const pairingKey = 'connection-flow-proof-v1'; // Same existing technical KV; no account progress or server store.
@@ -34,6 +36,7 @@ type Dependencies = {
   account: () => Promise<AccountView>;
   begin: () => Promise<{ authorizationUrl: string }>;
   cancel: () => void;
+  restartPending: (expectedEpoch: number) => boolean;
   epoch: () => number;
   waitSliceMs?: number;
   nativeProof?: NativeProofReader;
@@ -60,9 +63,12 @@ export class ConnectFlow {
   private pairingStarting: Promise<PairingStart> | null = null;
   private releasePairingAbort: (() => void) | null = null;
   private pairedRuntimeEpoch: number | null = null;
-  constructor(private d: Dependencies) {}
+  private native: NativeLogin;
+  private nativeChecking: { runId: string; threadId: string } | null = null;
+  constructor(private d: Dependencies) { this.native = new NativeLogin(d.sdk, d.kv, d.pluginId); }
 
   async load() {
+    await this.native.load();
     const parsed = flowSchema.safeParse(await this.d.kv.get(key));
     if (parsed.success) this.state = parsed.data;
     if (this.d.proofs) {
@@ -109,6 +115,20 @@ export class ConnectFlow {
   }
   async view(): Promise<ConnectFlowView> {
     await this.reconcileThread();
+    if (this.state.threadId && this.state.binding && ['setup', 'error'].includes(this.state.stage) &&
+        !(this.nativeChecking?.runId === this.state.runId && this.nativeChecking.threadId === this.state.threadId)) {
+      const owner = { runId: this.state.runId, threadId: this.state.threadId, binding: this.state.binding };
+      const native = await this.native.status(owner);
+      if (native && this.state.runId === owner.runId && this.state.threadId === owner.threadId) {
+        const message = native.running && native.retiring ? 'Завершаю предыдущую попытку входа. Нажми «Продолжить подключение» чуть позже.'
+          : native.running ? 'Ожидаю результат входа Codex. Если вкладка устарела или закрыта, нажми «Продолжить подключение».'
+          : native.success ? 'Вход завершён. Нажми «Продолжить подключение», чтобы проверить доступ партнёра.'
+            : 'Вход прервался. Нажми «Продолжить подключение», чтобы открыть новый вход.';
+        if (this.state.message !== message || this.state.retryable !== true || (native.running && this.state.stage !== 'setup'))
+          await this.save({ stage: native.running ? 'setup' : 'error', retryable: true, message },
+            () => this.state.runId === owner.runId && this.state.threadId === owner.threadId);
+      }
+    }
     if (this.state.stage === 'cabinet' && this.pendingCabinet) {
       const owner = this.pendingCabinet;
       const epoch = this.d.epoch();
@@ -195,6 +215,7 @@ export class ConnectFlow {
   }
   async deleted(threadId: string) {
     if (threadId !== this.state.threadId) return;
+    if (this.state.binding) await this.native.retire({ runId: this.state.runId, threadId, binding: this.state.binding });
     const pending = this.pendingCabinet;
     this.pendingCabinet = null;
     this.completing = null;
@@ -233,12 +254,17 @@ export class ConnectFlow {
     if (this.starting) return this.starting;
     this.starting = (async () => {
       const current = await this.view();
-      if (['setup', 'verify', 'cabinet', 'ready'].includes(current.stage)) return current;
-      if (current.retryable && current.threadId && current.binding &&
+      if (input.restartCabinet && current.binding && input.projectId && input.projectId !== current.binding.projectId)
+        throw new Error('Рабочее место подключения изменилось. Текущий вход не изменён.');
+      const restartCabinet = input.restartCabinet === true && current.stage === 'cabinet';
+      const resumeNative = input.restartCabinet === true && current.threadId && current.binding &&
+        this.native.owns({ runId: current.runId, threadId: current.threadId, binding: current.binding });
+      if (['setup', 'verify', 'cabinet', 'ready'].includes(current.stage) && !restartCabinet && !resumeNative) return current;
+      if ((current.retryable || restartCabinet || resumeNative) && current.threadId && current.binding &&
           (!input.projectId || input.projectId === current.binding.projectId)) {
         const { runId, threadId } = current;
         const binding = current.binding;
-        const epoch = this.d.epoch();
+        let epoch = this.d.epoch();
         const bindingKeys = ['projectId', 'environmentId', 'hostId', 'providerId'] as const;
         const matchesBinding = (value: typeof binding) => bindingKeys.every(key => value[key] === binding[key]);
         const valid = () => !this.disposed.signal.aborted && this.state.runId === runId && this.state.threadId === threadId &&
@@ -254,23 +280,95 @@ export class ConnectFlow {
         }
         // Check actual execution after the delayed metadata read, before any resume write.
         await this.caller({ threadId } as PluginAgentToolContext, true); check();
+        if (resumeNative) {
+          const validNative = async () => { check(); await this.checkPairingBinding({ threadId, binding }, this.disposed.signal); check(); };
+          const native = await this.native.continue({ runId, threadId, binding }, validNative); check();
+          this.nativeChecking = native.finished ? { runId, threadId } : null;
+          await this.save({ stage: 'setup', retryable: !native.finished, message: native.finished ? 'Проверяю доступ партнёра…' : native.message }, valid); check();
+          await this.d.sdk.threads.send({ threadId, mode: 'auto', input: [{ type: 'text', mentions: [], text:
+            `Продолжи проверку того же управляемого входа Codex: вызови svaib_connect_wait с terminalId ${native.terminalId}. ` +
+            'Не создавай второй терминал, не повторяй OAuth вручную и сохрани вход кабинета. После handedOff заверши ответ здесь.' }] }); check();
+          return this.view();
+        }
+        let openFreshCabinet = false;
+        if (input.restartCabinet) {
+          const account = await this.d.account(); check();
+          // Recheck the actual execution after the account await, before cancellation.
+          await this.checkPairingBinding({ threadId, binding }, this.disposed.signal); check();
+          if (this.state.stage === 'ready') return this.view();
+          if (account.state === 'waiting') {
+            const owner = this.pendingCabinet;
+            if (!owner || owner.runId !== runId || owner.threadId !== threadId || owner.epoch !== epoch)
+              throw new Error('Другой вход уже ожидает подтверждения. Текущий вход не изменён.');
+            // Atomic pending-only CAS: never cancel a callback already exchanging a grant.
+            if (!this.d.restartPending(epoch)) return this.view();
+            epoch++; check();
+            openFreshCabinet = true;
+          } else if (account.state === 'signed-out') openFreshCabinet = true;
+          else if (account.state !== 'connected') throw new Error('Не удалось проверить вход. Сохранённые подключения не изменены; повтори обновление.');
+        }
         const phase = metadata.data.phase === 'work' ? 'verify' : metadata.data.phase;
         if (metadata.data.phase === 'work') {
           // A crash may leave phase=work before the ready record. Reverify in place.
           await this.d.sdk.threads.updatePluginMetadata({ threadId, set: { phase, binding, unified: true } }); check();
         }
         await this.save({ stage: phase, retryable: false, message: 'Продолжаю подключение в прежнем разговоре…' }, valid); check();
+        if (openFreshCabinet) {
+          try {
+            const { authorizationUrl } = await this.d.begin();
+            if (this.d.epoch() !== epoch + 1) throw new Error('Подключение изменилось.');
+            epoch++; check();
+            this.pendingCabinet = { runId, threadId, epoch, url: authorizationUrl };
+            await this.save({ stage: 'cabinet', retryable: false, message: 'Подтверди новый вход в браузере. Уже выполненные шаги сохранятся.' }, valid); check();
+            await this.d.open(authorizationUrl, binding.hostId, this.disposed.signal); check();
+          } catch (error) {
+            if (error instanceof OAuthBeginError && error.startedEpoch === epoch + 1 && error.failureEpoch === this.d.epoch()) {
+              await this.checkPairingBinding({ threadId, binding }, this.disposed.signal);
+              epoch = error.failureEpoch;
+            }
+            if (valid()) await this.save({ stage: 'error', retryable: true, message: 'Не удалось открыть новый вход. Нажми «Продолжить подключение», чтобы повторить; уже выполненные шаги сохранятся.' }, valid);
+            throw error;
+          }
+        }
         await this.d.sdk.threads.send({ threadId, mode: 'auto', input: [{ type: 'text', mentions: [], text:
           (phase === 'verify' ? 'Повтори только настоящий MCP whoami и штатный finish в этом разговоре. Ничего не устанавливай и не запускай MCP OAuth. ' : 'Продолжи незавершённое подключение svaib в этом разговоре. ') +
-          'Сохрани работающие входы. Пользователь явно попросил повторить вход кабинета: при необходимости открой его браузер через reopenBrowser.' }] }); check();
+          (openFreshCabinet ? 'Новый вход кабинета уже открыт backend. Проверяй тот же вход штатным begin/finish без reopenBrowser; не начинай новый OAuth. ' : 'Пользователь явно попросил продолжить подключение: при необходимости открой незавершённый вход кабинета через reopenBrowser. ') +
+          'Сохрани работающие входы.' }] }); check();
         return this.view();
       }
       return this.startNew(input);
     })().finally(() => { this.starting = null; });
     return this.starting;
   }
+
+  async startNative(input: z.infer<typeof nativeStartSchema>, ctx: PluginAgentToolContext) {
+    const { binding } = await this.caller(ctx);
+    const runId = this.state.runId, epoch = this.d.epoch();
+    const valid = async () => {
+      ctx.signal.throwIfAborted(); this.disposed.signal.throwIfAborted();
+      if (this.state.runId !== runId || this.state.threadId !== ctx.threadId || this.d.epoch() !== epoch)
+        throw new Error('Подключение изменилось.');
+      await this.checkPairingBinding({ threadId: ctx.threadId, binding }, ctx.signal);
+    };
+    if (binding.providerId !== 'codex') throw new Error('Этот способ входа предназначен для Codex.');
+    let native: Awaited<ReturnType<NativeLogin['start']>>;
+    try { native = await this.native.start(input, { runId, threadId: ctx.threadId, binding }, valid); }
+    catch (error) {
+      await valid();
+      await this.save({ stage: 'error', retryable: true, message: 'Вход не начат. Нажми «Продолжить подключение», чтобы повторить; работающие входы сохранены.' },
+        () => this.state.runId === runId && this.state.threadId === ctx.threadId && this.d.epoch() === epoch);
+      throw error;
+    }
+    await valid();
+    await this.save({ stage: 'setup', retryable: true, message: native.message },
+      () => this.state.runId === runId && this.state.threadId === ctx.threadId && this.d.epoch() === epoch);
+    return { ...native, pending: true as const };
+  }
   private async startNew(input: z.infer<typeof startFlowSchema>) {
     const { sdk } = this.d;
+    // Explicitly starting another flow retires only our old unfinished helper.
+    // Its record remains until real process exit; native.start enforces that fence.
+    await this.native.retire();
     if (input.threadId && !await this.threadExists(input.threadId)) input = { ...input, threadId: null };
     const primaryHostId = (await sdk.system.config()).primaryHostId;
     if (!primaryHostId) throw new Error('BB ещё не подключён к компьютеру. Подключи coding agent в настройках BB.');
@@ -407,10 +505,15 @@ export class ConnectFlow {
     const deadline = Date.now() + (this.d.waitSliceMs ?? 20_000);
     do {
       signal.throwIfAborted();
+      const owner = { runId, threadId: ctx.threadId, binding };
+      if (this.native.owns(owner)) {
+        const owned = await this.native.status(owner);
+        if (owned?.terminalId !== terminalId) throw new Error('Выбран другой процесс входа. Продолжи текущий вход со страницы svaib.');
+      }
       const terminal = await this.d.sdk.terminals.get({ terminalId });
       if (terminal.hostId !== binding.hostId || terminal.initialCwd !== env.path) throw new Error('Терминал входа относится к другому рабочему месту.');
       if (!current()) throw new Error('Подключение изменилось.');
-      if (terminal.status !== 'running') {
+      if (!['running', 'starting'].includes(terminal.status)) {
         if (terminal.exitCode !== 0) {
           const message = 'Процесс входа партнёра завершился без подтверждения. Нажми «Продолжить подключение» на странице svaib в BB: повторится только незавершённый вход партнёра. Уже работающий вход кабинета сохранён.';
           await this.save({ stage: 'error', retryable: true, message }, current);

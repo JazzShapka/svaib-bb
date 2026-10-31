@@ -12,6 +12,7 @@ import { ConnectFlow, flowSchema, startFlowSchema } from './connect-flow';
 import { browserContract } from './browser-contract';
 import { opaqueProof } from './workplace-proof';
 import { methodCandidateInstructions } from './method-candidate';
+import { NATIVE_TOOL, nativeStartSchema } from './native-login';
 
 export const rpcContract = defineRpcContract({
   status: { input: z.object({ company_id: z.string().min(1).max(64) }).strict().nullable(), output: accountViewSchema },
@@ -58,7 +59,7 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     return result.proof ?? result.subject;
   };
   flow = new ConnectFlow({ sdk: bb.sdk, kv: bb.storage.kv, pluginId: bb.pluginId,
-    account: () => account.view(), begin: () => oauth.begin(), cancel: () => oauth.cancel(), epoch: () => oauth.epoch, changed,
+    account: () => account.view(), begin: () => oauth.begin(), cancel: () => oauth.cancel(), restartPending: epoch => oauth.restartPending(epoch), epoch: () => oauth.epoch, changed,
     open: async (url, hostId, signal) => { await browser.call('openLogin', { url }, { hostId, signal }); },
     nativeProof,
     ...(signedProof ? { proofs: { identity: account.workplaceIdentity.bind(account), begin: account.beginWorkplaceProof.bind(account),
@@ -84,6 +85,8 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   bb.agents.registerTool({ name: WAIT_TOOL, description: 'Ожидает завершение OAuth-процесса в указанном терминале без чтения вывода, затем автоматически запускает свежую проверку MCP.', parameters: z.object({ terminalId: z.string().regex(/^term_[a-z0-9]+$/) }).strict(),
     execute: async ({ terminalId }, ctx) => JSON.stringify(await connection.waitForMcp(terminalId, ctx)),
   });
+  bb.agents.registerTool({ name: NATIVE_TOOL, description: 'Открывает управляемый штатный вход Codex в проверенном локальном профиле; backend сам создаёт один принадлежащий подключению терминал. Возвращает только terminalId. OAuth URL и токены в модель не попадают.',
+    parameters: nativeStartSchema, execute: async (input, ctx) => JSON.stringify(await connection.startNative(input, ctx)) });
   bb.events.on('thread.failed', ({ thread }) => connection.failed(thread.id));
   bb.events.on('thread.deleted', ({ thread }) => connection.deleted(thread.id));
   const configure = (context: PluginAgentConfigurationContext) => {

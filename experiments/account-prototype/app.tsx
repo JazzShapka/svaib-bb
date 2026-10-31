@@ -54,7 +54,8 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   }
   async function openConnection() {
     // Recheck on every click: the conversation may have been deleted since refresh.
-    const next = await rpc.call('connect', { projectId: context.projectId, threadId: context.threadId });
+    const next = await rpc.call('connect', { projectId: context.projectId, threadId: context.threadId,
+      ...(['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? { restartCabinet: true } : {}) });
     setConnection(next);
     if (next.threadId && next.stage !== 'error') navigate.toThread(next.threadId);
   }
@@ -68,7 +69,8 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       </> : <>
         <p>Агент подготовит svaib к работе. Тебе останется подтвердить вход в браузере.</p>
         {connection?.message && <p role="status">{connection.message}</p>}
-        <button className="svaib-account-button svaib-account-primary" disabled={busy || !connection} onClick={() => void act(openConnection)}>{['setup', 'verify', 'cabinet'].includes(connection?.stage ?? '') ? 'Открыть подключение' : connection?.stage === 'error' ? 'Продолжить подключение' : 'Подключить svaib'}</button>
+        {connection?.stage === 'cabinet' && <p>Код истёк или страница не открывается? «Продолжить подключение» откроет новый вход в браузере. Уже выполненные шаги сохранятся.</p>}
+        <button className="svaib-account-button svaib-account-primary" disabled={busy || !connection} onClick={() => void act(openConnection)}>{['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? 'Продолжить подключение' : ['setup', 'verify'].includes(connection?.stage ?? '') ? 'Открыть подключение' : 'Подключить svaib'}</button>
       </>}
     </section>
     {error && <p role="alert" className="svaib-account-error">{error}</p>}

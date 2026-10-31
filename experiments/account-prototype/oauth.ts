@@ -20,8 +20,6 @@ export const SVAIB_OAUTH: OAuthEndpoints = {
 };
 export const PRODUCTION_SCOPES = ['profile:read', 'profile:write', 'company:read', 'company:write', 'workspace:read', 'workspace:write', 'offline_access'] as const;
 const LEGACY_SCOPES = 'profile:read profile:write offline_access';
-// Browser confirmation belongs to the connection, not to an agent turn or tool timeout.
-export const OAUTH_CONFIRMATION_MS = 30 * 60_000;
 
 /** A separate binding prevents old staging or profile-only grants being reused. */
 export function productionOAuth(): OAuthEndpoints {
@@ -33,7 +31,12 @@ const tokenSchema = z.object({
   access_token: z.string().min(1), token_type: z.string().regex(/^bearer$/i),
   refresh_token: z.string().min(1).optional(), expires_in: z.number().int().positive().max(31_536_000),
 });
-interface Pending { state: string; verifier: string; redirect: string; clientId: string; server: Server; timer: ReturnType<typeof setTimeout>; generation: number }
+interface Pending { state: string; verifier: string; redirect: string; clientId: string; server: Server; generation: number }
+export class OAuthBeginError extends Error {
+  constructor(readonly startedEpoch: number, readonly failureEpoch: number) {
+    super('Не удалось начать вход в svaib. Проверь соединение и повтори.');
+  }
+}
 
 function finishPage(response: ServerResponse, ok: boolean, expired = false) {
   response.writeHead(expired ? 410 : ok ? 200 : 400, {
@@ -47,7 +50,6 @@ function finishPage(response: ServerResponse, ok: boolean, expired = false) {
 /** One account per local BB server. No credentials ever leave this backend. */
 export class OAuthConnection {
   private pending: Pending | null = null;
-  private expired: Server | null = null;
   private generation = 0;
   private refresh: Promise<string | null> | null = null;
   private disposed = false;
@@ -140,8 +142,6 @@ export class OAuthConnection {
     this.error = '';
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(48).toString('base64url');
-    // Explicit retry retires the old recovery page, including a configured fixed port.
-    this.closeExpired();
     const server = createServer((request, response) => {
       // A callback from an expired listener can never consume a newer request.
       if (generation !== this.generation) { finishPage(response, false, true); return; }
@@ -155,19 +155,10 @@ export class OAuthConnection {
     const address = server.address();
     if (!address || typeof address === 'string') { server.close(); throw new Error('Не удалось открыть локальный адрес возврата.'); }
     const redirect = `http://127.0.0.1:${address.port}/callback`;
-    const timer = setTimeout(() => {
-      if (this.pending?.generation === generation) {
-        this.pending = null;
-        ++this.generation;
-        // Bound resources by count, not time: one credential-free recovery page
-        // remains reachable until explicit retry/cancel/dispose, even after a long pause.
-        this.closeExpired();
-        this.expired = server;
-        this.error = 'Время входа истекло. Нажми «Продолжить подключение» на странице svaib в BB.'; this.notify();
-      }
-    }, OAUTH_CONFIRMATION_MS);
-    timer.unref(); server.unref();
-    this.pending = { state, verifier, redirect, clientId: '', server, timer, generation };
+    // One receiver belongs to the BB process, not to a model turn or browser pause.
+    // AS request/code expiry is enforced by the provider, never prolonged here.
+    server.unref();
+    this.pending = { state, verifier, redirect, clientId: '', server, generation };
     try {
       if (!this.endpoints.clientId && !this.endpoints.registration) {
         throw new Error('Не указан OAuth client ID тестового контура.');
@@ -189,7 +180,11 @@ export class OAuthConnection {
       this.notify();
       return { authorizationUrl: url.href };
     } catch {
-      if (this.pending?.generation === generation) this.cancel();
+      if (this.pending?.generation === generation) {
+        this.cancel();
+        // An owned failure receipt, not an inference from a changed global epoch.
+        throw new OAuthBeginError(generation, this.generation);
+      }
       throw new Error('Не удалось начать вход в svaib. Проверь соединение и повтори.');
     }
   }
@@ -205,7 +200,6 @@ export class OAuthConnection {
     }
     this.pending = null;
     this.exchanging = pending.generation;
-    clearTimeout(pending.timer);
     pending.server.close();
     try {
       const codes = url.searchParams.getAll('code');
@@ -232,13 +226,16 @@ export class OAuthConnection {
 
   cancel() {
     ++this.generation; this.refresh = null; this.exchanging = null;
-    if (this.pending) { clearTimeout(this.pending.timer); this.pending.server.close(); this.pending = null; }
-    this.closeExpired();
+    if (this.pending) { this.pending.server.close(); this.pending = null; }
     this.notify();
   }
 
-  private closeExpired() {
-    if (this.expired) { this.expired.close(); this.expired = null; }
+  /** Replace only an unconsumed request owned by this generation. A callback
+   * already exchanging/saving its grant wins the race and must finish normally. */
+  restartPending(expectedEpoch: number): boolean {
+    if (this.disposed || this.generation !== expectedEpoch || !this.pending || this.exchanging !== null) return false;
+    this.cancel();
+    return true;
   }
 
   async logout(): Promise<{ revoked: boolean }> {
