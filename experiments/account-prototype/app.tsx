@@ -18,6 +18,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   const [busy, setBusy] = useState(false);
   const [companyId, setCompanyId] = useState('');
   const [companies, setCompanies] = useState<NonNullable<NonNullable<AccountView['me']>['companies']>>([]);
+  const blocked = connection?.stage === 'error' && connection.failure === 'native-technical';
   const sequence = useRef(0);
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
@@ -53,6 +54,10 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     finally { setBusy(false); }
   }
   async function openConnection() {
+    if (blocked) {
+      if (connection?.threadId) navigate.toThread(connection.threadId);
+      return;
+    }
     // Recheck on every click: the conversation may have been deleted since refresh.
     const next = await rpc.call('connect', { projectId: context.projectId, threadId: context.threadId,
       ...(['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? { restartCabinet: true } : {}) });
@@ -64,13 +69,13 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     <p className="svaib-account-note">{production ? 'Подключи партнёра и продолжи работу со своими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
     <section><h2>Партнёр svaib</h2>
       {connection?.stage === 'ready' ? <>
-        <p>{connection.verification === 'signed-grants' ? 'Два входа svaib проверены для этого подключения.' : 'Партнёр и аккаунт подключены.'} Можно продолжить разговор и онбординг.</p>
+        <p>Партнёр подключён. Можно продолжить разговор.</p>
         <button className="svaib-account-button svaib-account-primary" disabled={busy} onClick={() => void act(openConnection)}>К партнёру</button>
       </> : <>
-        <p>Агент подготовит svaib к работе. Тебе останется подтвердить вход в браузере.</p>
+        <p>{view?.state === 'connected' ? 'Кабинет подключён. Осталось проверить доступ партнёра.' : 'Агент подготовит svaib к работе. Тебе останется подтвердить вход в браузере.'}</p>
         {connection?.message && <p role="status">{connection.message}</p>}
         {connection?.stage === 'cabinet' && <p>Код истёк или страница не открывается? «Продолжить подключение» откроет новый вход в браузере. Уже выполненные шаги сохранятся.</p>}
-        <button className="svaib-account-button svaib-account-primary" disabled={busy || !connection} onClick={() => void act(openConnection)}>{['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? 'Продолжить подключение' : ['setup', 'verify'].includes(connection?.stage ?? '') ? 'Открыть подключение' : 'Подключить svaib'}</button>
+        <button className="svaib-account-button svaib-account-primary" disabled={busy || !connection || (blocked && !connection.threadId)} onClick={() => void act(openConnection)}>{blocked ? 'К разговору' : ['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? 'Продолжить подключение' : ['setup', 'verify'].includes(connection?.stage ?? '') ? 'Открыть подключение' : 'Подключить svaib'}</button>
       </>}
     </section>
     {error && <p role="alert" className="svaib-account-error">{error}</p>}

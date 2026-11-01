@@ -12,6 +12,7 @@ const recordSchema = z.object({ runId: z.string(), threadId: z.string(), binding
   terminalId: z.string(), startedAt: z.number(), input: nativeStartSchema, retiring: z.boolean().optional() }).strict();
 type Record = z.infer<typeof recordSchema>;
 const key = 'connection-native-login-v1';
+export const NATIVE_TECHNICAL_ERROR = 'Не удалось проверить доступ партнёра. Вход кабинета сохранён. Продолжи в разговоре BB: повторный вход сейчас не поможет.';
 
 /** Only terminals created here may receive Continue input. Their output is never read. */
 export class NativeLogin {
@@ -36,7 +37,7 @@ export class NativeLogin {
     if (!this.owns(owner)) return null;
     const { terminal, record } = await this.terminal(owner);
     return { terminalId: terminal.id, running: ['running', 'starting'].includes(terminal.status), success: terminal.exitCode === 0,
-      retiring: record.retiring === true };
+      retiring: record.retiring === true, technicalFailure: terminal.exitCode === 20 };
   }
   start(input: Input, owner: Owner, valid: () => Promise<void>) {
     if (this.starting) return this.starting.then(async result => {
@@ -121,6 +122,7 @@ export class NativeLogin {
       return { terminalId: terminal.id, finished: false, message: 'Продолжаю вход Codex. Уже работающий доступ сохранится.' };
     }
     if (terminal.exitCode === 0) return { terminalId: terminal.id, finished: true, message: 'Штатный вход завершён; теперь проверим доступ в BB.' };
+    if (terminal.exitCode === 20) throw new Error(NATIVE_TECHNICAL_ERROR);
     return this.start(record.input, owner, valid);
   }
 }

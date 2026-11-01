@@ -9,6 +9,7 @@ import json
 import os
 import queue
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,6 +33,10 @@ class WaitExpired(LoginError):
     pass
 
 
+class LoginIncomplete(LoginError):
+    pass
+
+
 class RenewRequested(Exception):
     pass
 
@@ -47,7 +52,11 @@ def command_json(argv, cwd=None):
 
 
 def verify_binding(args):
-    record = command_json(["bb", "thread", "show", args.thread_id, "--json"])
+    # BB terminals provide their own CLI through BB_CLI; it need not be on PATH.
+    cli = os.environ.get("BB_CLI") or shutil.which("bb")
+    if not cli or not Path(cli).is_absolute() or not Path(cli).is_file():
+        raise LoginError("Не найден CLI этого рабочего места BB.")
+    record = command_json([cli, "thread", "show", args.thread_id, "--json"])
     thread, environment = record.get("thread", {}), record.get("environment", {})
     expected = {
         "id": args.thread_id,
@@ -333,7 +342,7 @@ def login(
         or completed.get("name") != server_key
         or completed.get("threadId") != thread_id
     ):
-        raise LoginError("Вход Codex не завершён. Продолжи подключение в BB.")
+        raise LoginIncomplete("Вход Codex не завершён. Продолжи подключение в BB.")
 
 
 def main():
@@ -408,13 +417,16 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         main()
+    except (WaitExpired, LoginIncomplete):
+        print("Вход не завершён. Продолжи подключение в BB; вход кабинета сохранён.", file=sys.stderr)
+        sys.exit(1)
     except Exception:  # noqa: BLE001 - process boundary must redact private protocol failures
         # Even unexpected protocol failures may include a private OAuth URL in
         # their exception text. No native body or traceback leaves the helper.
         print(
-            "Вход не завершён. Вернись в BB → svaib → «Продолжить подключение». Сохранённые входы не удалены.",
+            "Не удалось запустить проверку доступа партнёра. Вход кабинета сохранён. Продолжи в разговоре BB.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        sys.exit(20)
     except KeyboardInterrupt:
         sys.exit(130)

@@ -6,7 +6,7 @@ import { continuationInputSchema, continuationSchema, continuationPrompt, checkC
 import { accountIdentity, type AccountView } from './contracts';
 import { connectionBindingSchema, connectionMetadataSchema } from './connection';
 import { OAuthBeginError } from './oauth';
-import { NativeLogin, nativeStartSchema } from './native-login';
+import { NativeLogin, nativeStartSchema, NATIVE_TECHNICAL_ERROR } from './native-login';
 import { challengeSchema, checkProofTime, nativePairingAnchor, opaqueProof, verifiedProofSchema,
   type WorkplaceProofPort, type WorkplaceChallenge } from './workplace-proof';
 
@@ -16,10 +16,11 @@ export const flowSchema = z.object({
   binding: connectionBindingSchema.nullable(), subject: z.string().nullable(),
   message: z.string(), retryable: z.boolean().default(false),
   verification: z.literal('signed-grants').optional(),
+  failure: z.literal('native-technical').optional(),
 }).strict();
 export type ConnectFlowView = z.infer<typeof flowSchema>;
 export const startFlowSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().min(1).nullable(), restartCabinet: z.boolean().optional(), continuation: continuationInputSchema.optional() }).strict();
-const empty = (): ConnectFlowView => ({ stage: 'idle', runId: '', threadId: null, binding: null, subject: null, message: '', retryable: false });
+const empty = (): ConnectFlowView => ({ stage: 'idle', runId: '', threadId: null, binding: null, subject: null, message: '', retryable: false, verification: undefined, failure: undefined });
 const key = 'connection-flow-v1';
 const pairingKey = 'connection-flow-proof-v1'; // Same existing technical KV; no account progress or server store.
 const pairingOwner = z.object({ runId: z.string(), threadId: z.string(), binding: connectionBindingSchema,
@@ -118,12 +119,14 @@ export class ConnectFlow {
       const owner = { runId: this.state.runId, threadId: this.state.threadId, binding: this.state.binding };
       const native = await this.native.status(owner);
       if (native && this.state.runId === owner.runId && this.state.threadId === owner.threadId) {
-        const message = native.running && native.retiring ? 'Завершаю предыдущую попытку входа. Нажми «Продолжить подключение» чуть позже.'
+        const message = native.technicalFailure ? NATIVE_TECHNICAL_ERROR
+          : native.running && native.retiring ? 'Завершаю предыдущую попытку входа. Нажми «Продолжить подключение» чуть позже.'
           : native.running ? 'Ожидаю результат входа Codex. Если вкладка устарела или закрыта, нажми «Продолжить подключение».'
           : native.success ? 'Вход завершён. Нажми «Продолжить подключение», чтобы проверить доступ партнёра.'
             : 'Вход прервался. Нажми «Продолжить подключение», чтобы открыть новый вход.';
-        if (this.state.message !== message || this.state.retryable !== true || (native.running && this.state.stage !== 'setup'))
-          await this.save({ stage: native.running ? 'setup' : 'error', retryable: true, message },
+        const retryable = !native.technicalFailure;
+        if (this.state.message !== message || this.state.retryable !== retryable || (native.running && this.state.stage !== 'setup'))
+          await this.save({ stage: native.running ? 'setup' : 'error', retryable, message, failure: native.technicalFailure ? 'native-technical' : undefined },
             () => this.state.runId === owner.runId && this.state.threadId === owner.threadId);
       }
     }
@@ -244,6 +247,7 @@ export class ConnectFlow {
     this.startingSource = input.threadId;
     this.starting = (async () => {
       const current = await this.view();
+      if (current.failure === 'native-technical' && input.restartCabinet) return current;
       if (input.continuation && current.threadId) {
         const existing = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: current.threadId }));
         if (existing.continuation?.sourceThreadId !== input.threadId || existing.continuation.sourceProjectId !== input.projectId) {
@@ -540,8 +544,9 @@ export class ConnectFlow {
       if (!current()) throw new Error('Подключение изменилось.');
       if (!['running', 'starting'].includes(terminal.status)) {
         if (terminal.exitCode !== 0) {
-          const message = 'Процесс входа партнёра завершился без подтверждения. Нажми «Продолжить подключение» на странице svaib в BB: повторится только незавершённый вход партнёра. Уже работающий вход кабинета сохранён.';
-          await this.save({ stage: 'error', retryable: true, message }, current);
+          const technicalFailure = terminal.exitCode === 20;
+          const message = technicalFailure ? NATIVE_TECHNICAL_ERROR : 'Процесс входа партнёра завершился без подтверждения. Нажми «Продолжить подключение» на странице svaib в BB: повторится только незавершённый вход партнёра. Уже работающий вход кабинета сохранён.';
+          await this.save({ stage: 'error', retryable: !technicalFailure, message, failure: technicalFailure ? 'native-technical' : undefined }, current);
           throw new Error(message);
         }
         return this.freshVerification(ctx, updates);
