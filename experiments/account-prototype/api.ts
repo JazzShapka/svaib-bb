@@ -1,5 +1,4 @@
 import { HttpFailure, requestJson, type Fetcher } from './http';
-import { SvaibMcp } from './mcp';
 
 export function companySelector(value: string): string {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)) throw new Error('invalid_company_selector');
@@ -8,11 +7,7 @@ export function companySelector(value: string): string {
 
 /** BB-specific API. OAuth still identifies the existing gateway resource. */
 export class SvaibApi {
-  private readonly legacy: SvaibMcp;
-  constructor(private readonly fetcher: Fetcher = fetch, private readonly base = 'https://api.svaib.com',
-    private readonly allowLegacyIdentity = true) {
-    this.legacy = new SvaibMcp(fetcher, `${base}/mcp`);
-  }
+  constructor(private readonly fetcher: Fetcher = fetch, private readonly base = 'https://api.svaib.com') {}
 
   private request(token: string, path: string, body?: unknown, companyId?: string, signal?: AbortSignal) {
     const selector = companyId === undefined ? '' : `?company_id=${encodeURIComponent(companySelector(companyId))}`;
@@ -26,15 +21,7 @@ export class SvaibApi {
   }
 
   async me(token: string, companyId?: string, signal?: AbortSignal): Promise<unknown> {
-    try { return await this.request(token, 'me', undefined, companyId, signal); }
-    catch (error) {
-      if (!this.allowLegacyIdentity || !(error instanceof HttpFailure) || error.status !== 404) throw error;
-      // Explicit compatibility with the deployed gateway: identity only, never UI settings.
-      signal?.throwIfAborted();
-      const me = await this.legacy.call(token, 'whoami', companyId === undefined ? {} : { company_id: companySelector(companyId) }, signal);
-      if (!me || typeof me !== 'object') throw new Error('Не удалось проверить аккаунт.');
-      return { ...me, capabilities: [] };
-    }
+    return this.request(token, 'me', undefined, companyId, signal);
   }
 
   profile(token: string, companyId?: string, signal?: AbortSignal) { return this.request(token, 'ui-profile', undefined, companyId, signal); }

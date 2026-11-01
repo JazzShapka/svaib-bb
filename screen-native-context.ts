@@ -4,12 +4,10 @@ import { lstat, open, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { PluginBbSdk, PluginKvStorage } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-import { readWhoamiProof, type NativeProofReader } from './experiments/account-prototype/whoami-proof';
 import type { ScreenContext } from './screen-transport';
 
 export type VerifiedScreenCompany = { account_id: string; company_id: string; subject_id: string; epoch: number };
 export interface ScreenAccountPort {
-  nativeProof?: NativeProofReader;
   epoch(): number;
   verifiedCompany(companyId: string, signal?: AbortSignal): Promise<VerifiedScreenCompany>;
   callMcpForContext(request: { name: string; arguments: Record<string, unknown> },
@@ -94,18 +92,9 @@ async function readCompanyBinding(environmentPath: string, allowUnbound: boolean
 
 type ContextOptions = { sdk: PluginBbSdk; kv: PluginKvStorage; account: ScreenAccountPort };
 
-/** Compatibility resolver for the separate native-MCP credential pairing route. */
-export function createScreenNativeContext(options: ContextOptions) {
-  return createScreenContext(options, false);
-}
-
-/** The plugin server and UI use one backend OAuth grant; no native MCP proof is claimed.
+/** The plugin server and UI use one backend OAuth grant.
  * First use may select an actual company before scaffold files exist. Later use is pinned. */
 export function createScreenPluginContext(options: ContextOptions) {
-  return createScreenContext(options, true);
-}
-
-function createScreenContext(options: ContextOptions, pluginGrant: boolean) {
   const queues = new Map<string, Promise<unknown>>();
   async function stored(threadId: string): Promise<Pin | undefined> {
     const value = await options.kv.get<unknown>(key(threadId));
@@ -125,7 +114,7 @@ function createScreenContext(options: ContextOptions, pluginGrant: boolean) {
     if (!system.primaryHostId || environment.hostId !== system.primaryHostId)
       throw new ScreenContextError('remote_host_unsupported', 'Этот Screen-кандидат работает на основном локальном компьютере BB. Удалённое рабочее место пока не подключено.');
     if (!environment.path) throw new ScreenContextError('workspace_root_invalid', 'BB не предоставил рабочую папку.');
-    return { thread, environment, binding: await readCompanyBinding(environment.path, pluginGrant) };
+    return { thread, environment, binding: await readCompanyBinding(environment.path, true) };
   }
   async function resolveUnlocked(threadId: string, signal: AbortSignal, selector?: string) {
     if (!/^thr_[a-z0-9]+$/.test(threadId)) throw new ScreenContextError('invalid_thread', 'Неизвестный разговор BB.');
@@ -142,28 +131,11 @@ function createScreenContext(options: ContextOptions, pluginGrant: boolean) {
       if (previous) await options.kv.set(key(threadId), { ...previous, state: 'blocked' });
       throw freshChat();
     }
-    let proof: Awaited<ReturnType<typeof readWhoamiProof>> = null;
-    if (!pluginGrant) {
-      try { proof = await readWhoamiProof(options.sdk, threadId, options.account.nativeProof, signal); }
-      catch { signal.throwIfAborted(); throw new ScreenContextError('native_whoami_required', 'Последний настоящий MCP whoami не подтвердил аккаунт. Повтори его в этом разговоре перед Screen.'); }
-      if (!proof) throw new ScreenContextError('native_whoami_required', 'Выполни настоящий MCP svaib whoami в этом разговоре, затем продолжи Screen.');
-    }
     const verified = await options.account.verifiedCompany(selectedCompany, signal);
     signal.throwIfAborted();
     if (!verified.account_id.startsWith('acct_') || !verified.subject_id ||
-      (!pluginGrant && proof!.subject !== verified.account_id) ||
       verified.company_id !== selectedCompany || verified.epoch !== options.account.epoch())
-      throw new ScreenContextError('account_mismatch', pluginGrant
-        ? 'Кабинет BB не подтвердил доступ к выбранной компании. Проверь подключение с партнёром.'
-        : 'Настоящий MCP whoami и кабинет BB подтверждают разные аккаунты. Сверь подключение с партнёром; Screen остановлен.');
-    if (!pluginGrant) {
-      if (proof!.context === 'company' && (proof!.company_id !== verified.company_id || proof!.subject_id !== verified.subject_id)) {
-        if (previous) await options.kv.set(key(threadId), { ...previous, state: 'blocked' });
-        throw freshChat();
-      }
-      if (proof!.context !== 'company' && proof!.context !== 'account')
-        throw new ScreenContextError('native_company_context_unproven', 'Результат whoami не доказывает контекст компании или нейтрального аккаунта. Повтори настоящий MCP whoami; старый строковый результат не подходит для Screen.');
-    }
+      throw new ScreenContextError('account_mismatch', 'Кабинет BB не подтвердил доступ к выбранной компании. Проверь подключение с партнёром.');
     const candidate: Pin = { schema: 1, state: 'pinned', thread_id: threadId,
       environment_id: live.environment.id, host_id: live.environment.hostId, real_root: live.binding.realRoot,
       company_id: verified.company_id, account_id: verified.account_id, subject_id: verified.subject_id,
@@ -172,7 +144,7 @@ function createScreenContext(options: ContextOptions, pluginGrant: boolean) {
       await options.kv.set(key(threadId), { ...previous, state: 'blocked' }); throw freshChat();
     }
     if (!previous) {
-      const lineage = [...new Set([live.thread.sourceThreadId, ...(pluginGrant ? [] : [live.thread.parentThreadId])].filter((v): v is string => !!v))];
+      const lineage = [...new Set([live.thread.sourceThreadId].filter((v): v is string => !!v))];
       if (lineage.length) {
         for (const parentId of lineage) {
           const parent = await stored(parentId);
@@ -182,7 +154,7 @@ function createScreenContext(options: ContextOptions, pluginGrant: boolean) {
             parent.subject_id !== candidate.subject_id) throw freshChat();
         }
       }
-      if (!live.thread.sourceThreadId && (!pluginGrant || live.thread.originKind === 'fork')) {
+      if (!live.thread.sourceThreadId && live.thread.originKind === 'fork') {
         // A mutable parent/group link cannot prove the origin of old history.
         // Unknown old history is not evidence of a clean chat. No transcript parsing or metadata trust.
         const history = await options.sdk.threads.events.list({ threadId,
@@ -199,13 +171,6 @@ function createScreenContext(options: ContextOptions, pluginGrant: boolean) {
       verified.epoch !== options.account.epoch()) {
       if (previous) await options.kv.set(key(threadId), { ...previous, state: 'blocked' });
       throw freshChat();
-    }
-    if (!pluginGrant) {
-      let latestProof;
-      try { latestProof = await readWhoamiProof(options.sdk, threadId, options.account.nativeProof, signal); }
-      catch { signal.throwIfAborted(); throw new ScreenContextError('native_whoami_required', 'Последний настоящий MCP whoami не подтвердил аккаунт. Повтори проверку.'); }
-      if (JSON.stringify(latestProof) !== JSON.stringify(proof))
-        throw new ScreenContextError('native_whoami_changed', 'Настоящий whoami изменился во время проверки доступа. Дождись последнего вызова и повтори Screen.');
     }
     signal.throwIfAborted();
     if (!previous) await options.kv.set(key(threadId), candidate);

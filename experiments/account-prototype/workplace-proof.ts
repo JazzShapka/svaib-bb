@@ -1,6 +1,6 @@
 import type { PluginBbSdk } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-import { isSvaibMcpServer } from './whoami-proof';
+import { isSvaibMcpServer } from './mcp-server';
 
 const time = z.number().int().nonnegative();
 export const opaqueProof = z.string().min(1).max(4096);

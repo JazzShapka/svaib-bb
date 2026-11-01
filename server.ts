@@ -133,14 +133,12 @@ export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     configPath: { type: 'string', label: 'Локальное описание пространств (абсолютный путь на BB-сервере)', default: '' },
     productionOAuthSession: { type: 'string', label: 'Подключение svaib (служебное, не редактировать)', secret: true },
-    methodCandidateManifestPath: { type: 'string', label: 'Manifest локального кандидата метода для контролируемого прогона (абсолютный путь)', default: '' },
   });
   const initialSettings = await settings.get();
   let configPath = initialSettings.configPath;
-  let methodCandidateManifestPath = initialSettings.methodCandidateManifestPath ?? '';
   const skillCatalogs = new Map<string, SkillCatalog>();
   const skillScope = (workspace: CatalogWorkspace) => JSON.stringify([workspace.projectId, workspace.environmentId, workspace.hostId]);
-  settings.onChange(next => { configPath = next.configPath; methodCandidateManifestPath = next.methodCandidateManifestPath ?? ''; skillCatalogs.clear(); });
+  settings.onChange(next => { configPath = next.configPath; skillCatalogs.clear(); });
   const primaryHostId = (await bb.sdk.system.config()).primaryHostId;
   function validateLocal(config: WorkplaceConfig) {
     validateInstructions(config);
@@ -162,8 +160,8 @@ export default async function plugin(bb: BbPluginApi) {
     }));
     return { ...config, workspaces };
   }
-  // Each module uses this plugin's identity; the old staging registration/store is untouched.
-  const account = await registerAccountModule(bb, { registerConfigure: false, methodCandidateManifestPath: () => methodCandidateManifestPath, sessionStore: {
+  // Each module uses the root plugin identity and production credential store.
+  const account = await registerAccountModule(bb, { registerConfigure: false, sessionStore: {
     read: async () => (await settings.get()).productionOAuthSession ?? '',
     write: async value => { await settings.experimental_set({ productionOAuthSession: value || null }); },
   } });
@@ -197,7 +195,8 @@ export default async function plugin(bb: BbPluginApi) {
     const own = context.origin.pluginId === bb.pluginId && context.origin.kind === null;
     const setup = own && context.pluginMetadata.task === 'svaib-connect';
     const supported = ['codex', 'claude-code'].includes(context.provider.id);
-    const base = setup ? account.configure(context) : own ? workplaceConfiguration(context) : { tools: [], skills: [] };
+    const base = setup ? account.configure(context) : own ? workplaceConfiguration(context)
+      : supported ? account.configure(context) : { tools: [], skills: [] };
     const finishedSetup = setup && context.pluginMetadata.phase === 'work';
     // BB freezes tools when constructing the provider session. A metadata-only
     // setup -> work transition cannot add Screen to that already running session.

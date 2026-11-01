@@ -6,12 +6,11 @@ import { SvaibApi } from './api';
 import { OAuthConnection, productionOAuth, type OAuthEndpoints, type SessionStore } from './oauth';
 import { SvaibMcp } from './mcp';
 import type { Fetcher } from './http';
-import type { NativeProofReader } from './whoami-proof';
-import { connectionConfiguration, connectionMetadataSchema, connectionThreadSchema, BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL } from './connection';
+import { connectionConfiguration, connectionMetadataSchema, connectionThreadSchema, BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, START_TOOL } from './connection';
 import { ConnectFlow, flowSchema, startFlowSchema } from './connect-flow';
 import { browserContract } from './browser-contract';
+import { continuationInputSchema } from './continuation';
 import { opaqueProof } from './workplace-proof';
-import { methodCandidateInstructions } from './method-candidate';
 import { NATIVE_TOOL, nativeStartSchema } from './native-login';
 
 export const rpcContract = defineRpcContract({
@@ -35,7 +34,6 @@ export interface AccountModuleOptions {
   apiBase?: string;
   fetcher?: Fetcher;
   registerConfigure?: boolean;
-  methodCandidateManifestPath?: () => string;
 }
 export type AccountModuleApi = Pick<BbPluginApi,
   'pluginId' | 'realtime' | 'onDispose' | 'hosts' | 'sdk' | 'storage' | 'agents' | 'events' | 'rpc'>;
@@ -50,58 +48,41 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   const changed = () => { bb.realtime.publish('account-changed', null); flow?.accountChanged(); };
   const oauth = new OAuthConnection(options.sessionStore, changed, fetcher, endpoints);
   bb.onDispose(() => oauth.dispose());
-  const account = new AccountController(oauth, new SvaibApi(fetcher, apiBase, false), new SvaibMcp(fetcher, endpoints.resource));
-  const signedProof = endpoints.resource === 'https://api.svaib.com/mcp' && apiBase === 'https://api.svaib.com';
+  const account = new AccountController(oauth, new SvaibApi(fetcher, apiBase), new SvaibMcp(fetcher, endpoints.resource));
+  if (endpoints.resource !== 'https://api.svaib.com/mcp' || apiBase !== 'https://api.svaib.com') throw new Error('production_resource_required');
   const browser = bb.hosts.experimental_client({ contract: browserContract });
-  const nativeProof: NativeProofReader = async ({ hostId, signal, ...input }) => {
-    if (!input.expectedCallId) return null;
-    const result = await browser.call('readCodexWhoami', { ...input, expectedCallId: input.expectedCallId }, { hostId, ...(signal ? { signal } : {}) });
-    return result.proof ?? result.subject;
-  };
   flow = new ConnectFlow({ sdk: bb.sdk, kv: bb.storage.kv, pluginId: bb.pluginId,
     account: () => account.view(), begin: () => oauth.begin(), cancel: () => oauth.cancel(), restartPending: epoch => oauth.restartPending(epoch), epoch: () => oauth.epoch, changed,
     open: async (url, hostId, signal) => { await browser.call('openLogin', { url }, { hostId, signal }); },
-    nativeProof,
-    ...(signedProof ? { proofs: { identity: account.workplaceIdentity.bind(account), begin: account.beginWorkplaceProof.bind(account),
-      verify: account.verifyWorkplaceProof.bind(account) } } : {}),
+    proofs: { identity: account.workplaceIdentity.bind(account), begin: account.beginWorkplaceProof.bind(account),
+      verify: account.verifyWorkplaceProof.bind(account) },
   });
   await flow.load();
   const connection = flow;
   bb.onDispose(() => connection.dispose());
-  if (signedProof) {
     bb.agents.registerTool({ name: BEGIN_TOOL, description: 'Начинает или проверяет вход кабинета svaib без заявления native готовности. После подтверждения возвращает серверный challenge для native MCP issue_workplace_proof. Токены и OAuth-ссылки не возвращает.',
-      parameters: z.object({ reopenBrowser: z.boolean().optional().describe('Только по просьбе пользователя повторно открыть закрытую вкладку.') }).strict(),
-      execute: async ({ reopenBrowser }, ctx) => JSON.stringify(await connection.preparePairing(ctx, reopenBrowser)) });
+      parameters: z.object({ continuation: continuationInputSchema.optional(), reopenBrowser: z.boolean().optional().describe('Только по просьбе пользователя повторно открыть закрытую вкладку.') }).strict(),
+      execute: async ({ reopenBrowser, continuation }, ctx) => JSON.stringify(await connection.preparePairing(ctx, reopenBrowser, continuation)) });
     bb.agents.registerTool({ name: FINISH_TOOL, description: 'Проверяет opaque proof от настоящего native MCP issue_workplace_proof через отдельный вход backend. Завершает сопоставление двух account grants в текущем подключении. Не принимает account_id или токены.',
       parameters: z.object({ proof: opaqueProof }).strict(),
       execute: async ({ proof }, ctx) => JSON.stringify(await connection.complete(proof, ctx)) });
-  } else bb.agents.registerTool({ name: FINISH_TOOL, description: 'После настоящего MCP whoami завершает единое подключение svaib и кабинета. Сам открывает браузер и ожидает подтверждение, не возвращает OAuth-ссылки.',
-    parameters: z.object({ subject: z.string().min(1).max(128), reopenBrowser: z.boolean().optional().describe('Только если пользователь попросил открыть закрытую вкладку или повторить вход. Текущий действующий запрос откроется снова без нового OAuth.') }).strict(),
-    execute: async ({ subject, reopenBrowser }, ctx) => JSON.stringify(await connection.complete(subject, ctx, reopenBrowser)),
+  bb.agents.registerTool({ name: START_TOOL, description: 'По явному поручению подключить svaib передаёт ограниченное продолжение из текущего BB-разговора и открывает подключение. Сохрани исходный объём поручения; не передавай credentials или полный transcript.',
+    parameters: continuationInputSchema, execute: async (continuation, ctx) => {
+      const result = await connection.start({ projectId: ctx.projectId, threadId: ctx.threadId, continuation });
+      if (result.threadId) await bb.sdk.threads.open({ threadId: result.threadId, file: null });
+      return JSON.stringify(result);
+    } });
+  bb.agents.registerTool({ name: FRESH_TOOL, description: 'После установки и входа MCP запускает свежую проверку в той же среде автоматически. Не выполняет повторный OAuth.', parameters: z.object({ continuation: continuationInputSchema.optional() }).strict(),
+    execute: async ({ continuation }, ctx) => JSON.stringify(await connection.freshVerification(ctx, continuation)),
   });
-  bb.agents.registerTool({ name: FRESH_TOOL, description: 'После установки и входа MCP запускает свежую проверку в той же среде автоматически. Не выполняет повторный OAuth.', parameters: z.object({}).strict(),
-    execute: async (_, ctx) => JSON.stringify(await connection.freshVerification(ctx)),
-  });
-  bb.agents.registerTool({ name: WAIT_TOOL, description: 'Ожидает завершение OAuth-процесса в указанном терминале без чтения вывода, затем автоматически запускает свежую проверку MCP.', parameters: z.object({ terminalId: z.string().regex(/^term_[a-z0-9]+$/) }).strict(),
-    execute: async ({ terminalId }, ctx) => JSON.stringify(await connection.waitForMcp(terminalId, ctx)),
+  bb.agents.registerTool({ name: WAIT_TOOL, description: 'Ожидает завершение OAuth-процесса в указанном терминале без чтения вывода, затем автоматически запускает свежую проверку MCP.', parameters: z.object({ terminalId: z.string().regex(/^term_[a-z0-9]+$/), continuation: continuationInputSchema.optional() }).strict(),
+    execute: async ({ terminalId, continuation }, ctx) => JSON.stringify(await connection.waitForMcp(terminalId, ctx, continuation)),
   });
   bb.agents.registerTool({ name: NATIVE_TOOL, description: 'Открывает управляемый штатный вход Codex в проверенном локальном профиле; backend сам создаёт один принадлежащий подключению терминал. Возвращает только terminalId. OAuth URL и токены в модель не попадают.',
     parameters: nativeStartSchema, execute: async (input, ctx) => JSON.stringify(await connection.startNative(input, ctx)) });
   bb.events.on('thread.failed', ({ thread }) => connection.failed(thread.id));
   bb.events.on('thread.deleted', ({ thread }) => connection.deleted(thread.id));
-  const configure = (context: PluginAgentConfigurationContext) => {
-    const configured = connectionConfiguration(context, bb.pluginId, signedProof);
-    if (configured.instructions && context.origin.pluginId === bb.pluginId &&
-        connectionMetadataSchema.safeParse(context.pluginMetadata).success) {
-      try {
-        const source = methodCandidateInstructions(options.methodCandidateManifestPath?.() ?? '', context.provider.id);
-        if (source) return { ...configured, instructions: source + configured.instructions };
-      } catch (error) {
-        return { tools: [], skills: [], instructions: error instanceof Error ? error.message : 'Кандидат не проверен. Останови установку.' };
-      }
-    }
-    return configured;
-  };
+  const configure = (context: PluginAgentConfigurationContext) => connectionConfiguration(context, bb.pluginId);
   if (options.registerConfigure !== false) bb.agents.configure(configure);
   bb.rpc.register(rpcContract, {
     connectionThread: async ({ threadId }) => {
@@ -117,7 +98,11 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     status: input => account.view(input?.company_id),
     connectionStatus: () => connection.view(),
     partnerIdentity: () => connection.partnerIdentity(),
-    connect: input => connection.start(input),
+    connect: async input => {
+      const result = await connection.start(input);
+      if (result.threadId && result.stage !== 'error') await bb.sdk.threads.open({ threadId: result.threadId, file: null });
+      return result;
+    },
     beginLogin: () => {
       if (!endpoints.clientId?.trim() && !endpoints.registration) throw new Error('Сначала укажи OAuth client ID тестового контура в настройках плагина и перезагрузи его.');
       return oauth.begin();
@@ -130,7 +115,7 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     },
   });
   return {
-    account, connection, configure, nativeProof,
+    account, connection, configure,
     epoch: () => oauth.epoch,
     verifiedCompany: account.verifiedCompany.bind(account),
     callMcpForContext: account.callMcpForContext.bind(account),

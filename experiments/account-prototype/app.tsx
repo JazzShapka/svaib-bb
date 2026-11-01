@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { definePluginApp, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
-import type { rpcContract } from './server';
+import type { rpcContract } from './account-module';
 import { accountIdentity, hasCompanyMembership, type AccountView } from './contracts';
 import type { PluginNavPanelProps } from '@get-bb/plugin-sdk/app';
 import { useBbContext, useBbNavigate } from '@get-bb/plugin-sdk/app';

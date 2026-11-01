@@ -2,11 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { PluginBbSdk, PluginKvStorage, PluginAgentToolContext } from '@get-bb/plugin-sdk';
+import { continuationInputSchema, continuationSchema, continuationPrompt, checkContinuation, mergeContinuation, type ContinuationInput, type Continuation } from './continuation';
 import { accountIdentity, type AccountView } from './contracts';
 import { connectionBindingSchema, connectionMetadataSchema } from './connection';
 import { OAuthBeginError } from './oauth';
 import { NativeLogin, nativeStartSchema } from './native-login';
-import { readWhoamiProof, type NativeProofReader } from './whoami-proof';
 import { challengeSchema, checkProofTime, nativePairingAnchor, opaqueProof, verifiedProofSchema,
   type WorkplaceProofPort, type WorkplaceChallenge } from './workplace-proof';
 
@@ -15,10 +15,10 @@ export const flowSchema = z.object({
   runId: z.string(), threadId: z.string().nullable(),
   binding: connectionBindingSchema.nullable(), subject: z.string().nullable(),
   message: z.string(), retryable: z.boolean().default(false),
-  verification: z.enum(['native-timeline', 'signed-grants']).optional(),
+  verification: z.literal('signed-grants').optional(),
 }).strict();
 export type ConnectFlowView = z.infer<typeof flowSchema>;
-export const startFlowSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().min(1).nullable(), restartCabinet: z.boolean().optional() }).strict();
+export const startFlowSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().min(1).nullable(), restartCabinet: z.boolean().optional(), continuation: continuationInputSchema.optional() }).strict();
 const empty = (): ConnectFlowView => ({ stage: 'idle', runId: '', threadId: null, binding: null, subject: null, message: '', retryable: false });
 const key = 'connection-flow-v1';
 const pairingKey = 'connection-flow-proof-v1'; // Same existing technical KV; no account progress or server store.
@@ -39,8 +39,7 @@ type Dependencies = {
   restartPending: (expectedEpoch: number) => boolean;
   epoch: () => number;
   waitSliceMs?: number;
-  nativeProof?: NativeProofReader;
-  proofs?: WorkplaceProofPort;
+  proofs: WorkplaceProofPort;
   open: (url: string, hostId: string, signal: AbortSignal) => Promise<void>;
   changed: () => void;
 };
@@ -51,6 +50,7 @@ type CompletionResult = { connected: true; subject: string; threadId: string } |
 export class ConnectFlow {
   private state = empty();
   private starting: Promise<ConnectFlowView> | null = null;
+  private startingSource: string | null = null;
   private completing: Promise<CompletionResult> | null = null;
   private completionOwner: { threadId: string; subject: string } | null = null;
   private verifying: Promise<{ threadId: string; handedOff: true; message: string }> | null = null;
@@ -71,15 +71,13 @@ export class ConnectFlow {
     await this.native.load();
     const parsed = flowSchema.safeParse(await this.d.kv.get(key));
     if (parsed.success) this.state = parsed.data;
-    if (this.d.proofs) {
-      const proof = pairingSchema.safeParse(await this.d.kv.get(pairingKey));
-      // An interrupted challenge never survives a runtime restart. Completed pairing is historical evidence.
-      if (proof.success && proof.data.state === 'verified' && proof.data.runId === this.state.runId &&
-          proof.data.threadId === this.state.threadId && proof.data.accountId === this.state.subject) {
-        this.pairing = proof.data; this.pairedRuntimeEpoch = this.d.epoch();
-      }
-      else if (proof.success) await this.savePairing(null);
+    const proof = pairingSchema.safeParse(await this.d.kv.get(pairingKey));
+    // An interrupted challenge never survives a runtime restart. Completed pairing is historical evidence.
+    if (proof.success && proof.data.state === 'verified' && proof.data.runId === this.state.runId &&
+        proof.data.threadId === this.state.threadId && proof.data.accountId === this.state.subject) {
+      this.pairing = proof.data; this.pairedRuntimeEpoch = this.d.epoch();
     }
+    else if (proof.success) await this.savePairing(null);
     await this.reconcileThread();
     // Recover only the known interrupted-wait states from the previous version.
     if (this.state.stage === 'error' && this.state.binding && this.state.threadId &&
@@ -143,13 +141,7 @@ export class ConnectFlow {
     if (this.provisionalReady?.runId === this.state.runId && this.provisionalReady.threadId === this.state.threadId) {
       return structuredClone(this.provisionalReady.previous);
     }
-    if (this.state.stage === 'ready' && this.d.proofs) return this.signedReadyView();
-    if (this.state.stage === 'ready') {
-      const account = await this.d.account();
-      if (account.state !== 'connected' || !account.me || accountIdentity(account.me) !== this.state.subject) {
-        return { ...this.state, stage: 'error', message: 'Подключение кабинета изменилось. Продолжи подключение svaib.' };
-      }
-    }
+    if (this.state.stage === 'ready') return this.signedReadyView();
     return structuredClone(this.state);
   }
 
@@ -191,7 +183,7 @@ export class ConnectFlow {
       const account = await this.d.account();
       if (!current() || account.state !== 'connected' || !account.me || accountIdentity(account.me) !== proof.accountId)
         throw new Error('Подключение изменилось.');
-      const identity = await this.d.proofs!.identity();
+      const identity = await this.d.proofs.identity();
       if (!current() || identity.account_id !== proof.accountId || identity.client_id !== proof.clientId || identity.epoch !== epoch)
         throw new Error('Подключение изменилось.');
       // This is intentionally the last external read, after account/identity awaits.
@@ -233,27 +225,35 @@ export class ConnectFlow {
     const { threadId, runId } = this.state;
     const epoch = this.d.epoch();
     if (!threadId) return { subject: null, threadId: null };
-    if (this.d.proofs) {
-      const view = await this.view();
-      const proof = this.pairing;
-      if (view.stage !== 'ready' || proof?.state !== 'verified') return { subject: null, threadId };
-      try { await this.checkPairingBinding(proof, this.disposed.signal); }
-      catch { await this.withdrawSignedReady(this.state, proof); return { subject: null, threadId }; }
-      return this.state.threadId === threadId && this.state.runId === runId && this.d.epoch() === epoch &&
-        this.pairing === proof && this.state.stage === 'ready' && this.pairedRuntimeEpoch === epoch
-        ? { subject: view.subject, threadId } : { subject: null, threadId };
-    }
-    const proof = await readWhoamiProof(this.d.sdk, threadId, this.d.nativeProof);
-    if (this.state.threadId !== threadId || this.state.runId !== runId || this.d.epoch() !== epoch) {
-      return { subject: null, threadId: null };
-    }
-    return { subject: proof?.subject ?? null, threadId };
+    const view = await this.view();
+    const proof = this.pairing;
+    if (view.stage !== 'ready' || proof?.state !== 'verified') return { subject: null, threadId };
+    try { await this.checkPairingBinding(proof, this.disposed.signal); }
+    catch { await this.withdrawSignedReady(this.state, proof); return { subject: null, threadId }; }
+    return this.state.threadId === threadId && this.state.runId === runId && this.d.epoch() === epoch &&
+      this.pairing === proof && this.state.stage === 'ready' && this.pairedRuntimeEpoch === epoch
+      ? { subject: view.subject, threadId } : { subject: null, threadId };
   }
 
   start(input: z.infer<typeof startFlowSchema>): Promise<ConnectFlowView> {
-    if (this.starting) return this.starting;
+    input = startFlowSchema.parse(input);
+    if (this.starting) {
+      if (input.continuation && input.threadId !== this.startingSource) return Promise.reject(new Error('Уже передаётся поручение из другого разговора.'));
+      return this.starting;
+    }
+    this.startingSource = input.threadId;
     this.starting = (async () => {
       const current = await this.view();
+      if (input.continuation && current.threadId) {
+        const existing = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: current.threadId }));
+        if (existing.continuation?.sourceThreadId !== input.threadId || existing.continuation.sourceProjectId !== input.projectId) {
+          // A completed run is historical evidence. An explicit assignment from
+          // another source owns a new verification; grants and the old chat stay.
+          if (current.stage === 'ready') return this.startNew(input);
+          throw new Error('Уже продолжается подключение из другого разговора. Открой существующее продолжение; входы сохранены.');
+        }
+        checkContinuation(existing.continuation, current.binding!.projectId, current.binding!.environmentId);
+      }
       if (input.restartCabinet && current.binding && input.projectId && input.projectId !== current.binding.projectId)
         throw new Error('Рабочее место подключения изменилось. Текущий вход не изменён.');
       const restartCabinet = input.restartCabinet === true && current.stage === 'cabinet';
@@ -331,13 +331,13 @@ export class ConnectFlow {
           }
         }
         await this.d.sdk.threads.send({ threadId, mode: 'auto', input: [{ type: 'text', mentions: [], text:
-          (phase === 'verify' ? 'Повтори только настоящий MCP whoami и штатный finish в этом разговоре. Ничего не устанавливай и не запускай MCP OAuth. ' : 'Продолжи незавершённое подключение svaib в этом разговоре. ') +
+          (phase === 'verify' ? 'Получай актуальный challenge через svaib_connect_begin, затем native MCP issue_workplace_proof и svaib_connect_finish({proof}). Ничего не устанавливай и не запускай MCP OAuth. ' : 'Продолжи незавершённое подключение svaib в этом разговоре. ') +
           (openFreshCabinet ? 'Новый вход кабинета уже открыт backend. Проверяй тот же вход штатным begin/finish без reopenBrowser; не начинай новый OAuth. ' : 'Пользователь явно попросил продолжить подключение: при необходимости открой незавершённый вход кабинета через reopenBrowser. ') +
           'Сохрани работающие входы.' }] }); check();
         return this.view();
       }
       return this.startNew(input);
-    })().finally(() => { this.starting = null; });
+    })().finally(() => { this.starting = null; this.startingSource = null; });
     return this.starting;
   }
 
@@ -369,10 +369,12 @@ export class ConnectFlow {
     // Explicitly starting another flow retires only our old unfinished helper.
     // Its record remains until real process exit; native.start enforces that fence.
     await this.native.retire();
-    if (input.threadId && !await this.threadExists(input.threadId)) input = { ...input, threadId: null };
+    if (input.threadId && !await this.threadExists(input.threadId)) throw new Error('Исходный разговор недоступен. Открой исходное поручение и повтори подключение.');
+    if (input.continuation && !input.threadId) throw new Error('Для передачи поручения нужен явный исходный разговор.');
     const primaryHostId = (await sdk.system.config()).primaryHostId;
     if (!primaryHostId) throw new Error('BB ещё не подключён к компьютеру. Подключи coding agent в настройках BB.');
     let projectId = input.projectId;
+    let sourceEnvironmentId: string | null = null;
     let environment: Parameters<PluginBbSdk['threads']['spawn']>[0]['environment'];
     let providerId: string | undefined;
     let execution: { model?: string; permissionMode?: 'auto' | 'accept-edits' | 'full'; reasoningLevel?: string; serviceTier?: string } = {};
@@ -382,7 +384,7 @@ export class ConnectFlow {
       if (!source.environmentId) throw new Error('Рабочее место ещё не готово. Повтори подключение после его запуска.');
       const env = await sdk.environments.get({ environmentId: source.environmentId });
       if (env.hostId !== primaryHostId) throw new Error('Этот вариант подключения пока работает только с локальным BB.');
-      projectId = source.projectId;
+      projectId = source.projectId; sourceEnvironmentId = env.id;
       providerId = source.providerId;
       const defaults = await sdk.threads.defaultExecutionOptions({ threadId: source.id });
       if (defaults) execution = { model: defaults.model, permissionMode: defaults.permissionMode, reasoningLevel: defaults.reasoningLevel, serviceTier: defaults.serviceTier };
@@ -404,14 +406,17 @@ export class ConnectFlow {
       if (defaults) { providerId = defaults.providerId; execution = { ...defaults }; }
     }
     if (providerId && !['codex', 'claude-code'].includes(providerId)) throw new Error('Для подключения svaib выбери в BB Codex или Claude Code.');
+    const continuation: Continuation = continuationSchema.parse({ version: 1,
+      sourceThreadId: input.threadId, captured: !!input.continuation, sourceProjectId: projectId, sourceEnvironmentId, data: input.continuation ?? {
+        intent: 'Подключить svaib', scope: 'connection-only', nextStep: 'Проверить подключение', materials: [], constraints: [], agreements: [] } });
     const runId = randomUUID();
     await this.savePairing(null);
     await this.save({ ...empty(), runId, stage: 'setup', message: 'Подключаю svaib…' });
     let createdThreadId: string | undefined;
     try {
       const thread = await sdk.threads.spawn({ projectId, environment, ...execution, ...(providerId ? { providerId } : {}),
-        title: 'Подключение svaib', prompt: 'Подключи svaib целиком: партнёра и кабинет. Выполни техническую настройку сам; мне оставь подтверждение входа в браузере.',
-        pluginMetadata: { schema: 1, task: 'svaib-connect', phase: 'setup', unified: true, runId, targetHostId: primaryHostId },
+        title: 'Подключение svaib', prompt: 'Подключи svaib целиком: партнёра и кабинет. Выполни техническую настройку сам; мне оставь подтверждение входа в браузере.' + continuationPrompt(continuation),
+        pluginMetadata: { schema: 1, task: 'svaib-connect', phase: 'setup', unified: true, runId, continuation, targetHostId: primaryHostId },
       });
       createdThreadId = thread.id;
       await this.save({ threadId: thread.id });
@@ -464,39 +469,59 @@ export class ConnectFlow {
     return { thread, binding: b };
   }
 
-  async freshVerification(ctx: PluginAgentToolContext) {
+  async freshVerification(ctx: PluginAgentToolContext, updates?: ContinuationInput) {
+    if (ctx.threadId !== this.state.threadId) {
+      const metadata = connectionMetadataSchema.safeParse(await this.d.sdk.threads.getPluginMetadata({ threadId: ctx.threadId }));
+      if (metadata.success && metadata.data.runId === this.state.runId && metadata.data.successorThreadId === this.state.threadId) {
+        await this.checkPairingBinding({ threadId: this.state.threadId!, binding: this.state.binding! }, ctx.signal);
+        return { threadId: this.state.threadId!, handedOff: true as const, message: `Продолжение уже открыто: @thread:${this.state.threadId}. Помоги перейти туда; не повторяй вход.` };
+      }
+    }
     if (this.verifying && ctx.threadId === this.state.threadId) return this.verifying;
-    const flight = this.beginVerification(ctx);
+    const flight = this.beginVerification(ctx, updates);
     this.verifying = flight;
     try { return await flight; } finally { if (this.verifying === flight) this.verifying = null; }
   }
 
-  private async beginVerification(ctx: PluginAgentToolContext) {
+  private async beginVerification(ctx: PluginAgentToolContext, updates?: ContinuationInput) {
     const { thread: source, binding } = await this.caller(ctx);
     const runId = this.state.runId;
-    if (this.state.stage !== 'setup' && !(this.d.proofs && this.state.stage === 'verify'))
+    if (!['setup', 'verify'].includes(this.state.stage))
       throw new Error('Свежая проверка уже запущена. Не повторяй вход или установку.');
+    const metadata = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: source.id }));
+    if (metadata.runId !== runId || metadata.phase !== 'setup') throw new Error('Свежая проверка уже запущена или контекст изменился.');
+    let continuation = metadata.continuation ? checkContinuation(metadata.continuation, binding.projectId, binding.environmentId) : undefined;
+    if (updates) { if (!continuation) throw new Error('Нет исходной передачи.'); continuation = mergeContinuation(continuation, updates); }
     const defaults = await this.d.sdk.threads.defaultExecutionOptions({ threadId: source.id });
     if (this.state.runId !== runId || this.state.threadId !== source.id) throw new Error('Подключение изменилось. Повтори со страницы рабочего места.');
     const thread = await this.d.sdk.threads.spawn({ projectId: binding.projectId,
       environment: { type: 'reuse', environmentId: binding.environmentId }, providerId: binding.providerId,
       ...(defaults ? { model: defaults.model, permissionMode: defaults.permissionMode, reasoningLevel: defaults.reasoningLevel, serviceTier: defaults.serviceTier } : {}),
-      title: 'Партнёр svaib', prompt: this.d.proofs
-        ? 'Продолжи проверку svaib: получи текущий challenge через svaib_connect_begin, вызови native MCP issue_workplace_proof и передай его proof в svaib_connect_finish. Ничего не переустанавливай и не запускай повторный MCP OAuth.'
-        : 'Проверь подключение svaib настоящим MCP whoami. При успехе заверши общее подключение кабинета штатным инструментом плагина. Ничего не устанавливай и не запускай повторный MCP OAuth.',
-      pluginMetadata: { schema: 1, task: 'svaib-connect', phase: 'verify', binding, unified: true, runId, targetHostId: binding.hostId },
+      title: 'Партнёр svaib', prompt: ('Продолжи проверку svaib: получи текущий challenge через svaib_connect_begin, вызови native MCP issue_workplace_proof и передай его proof в svaib_connect_finish. Ничего не переустанавливай и не запускай повторный MCP OAuth.') + continuationPrompt(continuation, source.id),
+      pluginMetadata: { schema: 1, task: 'svaib-connect', phase: 'verify', binding, unified: true, runId, ...(continuation ? { continuation } : {}), previousThreadId: source.id, targetHostId: binding.hostId },
     });
     if (this.state.runId !== runId || this.state.threadId !== source.id) {
       await this.d.sdk.threads.stop({ threadId: thread.id });
       throw new Error('Разговор подключения удалён или заменён. Начни подключение со страницы рабочего места.');
     }
-    await this.save({ stage: 'verify', threadId: thread.id, message: 'Проверяю доступ партнёра…' });
+    const ownsSource = () => this.state.runId === runId && this.state.threadId === source.id && !this.disposed.signal.aborted;
+    try {
+      await this.d.sdk.threads.updatePluginMetadata({ threadId: source.id, set: { successorThreadId: thread.id } });
+      if (!ownsSource()) throw new Error('Подключение изменилось.');
+      await this.save({ stage: 'verify', threadId: thread.id, message: 'Проверяю доступ партнёра…' }, () => this.state.runId === runId && [source.id, thread.id].includes(this.state.threadId!) && !this.disposed.signal.aborted);
+    } catch (error) {
+      await this.d.sdk.threads.stop({ threadId: thread.id });
+      const latest = connectionMetadataSchema.safeParse(await this.d.sdk.threads.getPluginMetadata({ threadId: source.id }));
+      if (latest.success && latest.data.runId === runId && latest.data.successorThreadId === thread.id)
+        await this.d.sdk.threads.updatePluginMetadata({ threadId: source.id, remove: ['successorThreadId'] });
+      throw error;
+    }
     await this.savePairing(null);
     await this.d.sdk.threads.open({ threadId: thread.id, file: null });
     return { threadId: thread.id, handedOff: true as const, message: 'Проверка открыта в новом разговоре. Настройка в исходном разговоре окончена: заверши ответ и больше не вызывай whoami, finish или OAuth здесь. Подключение завершит новый разговор.' };
   }
 
-  async waitForMcp(terminalId: string, ctx: PluginAgentToolContext) {
+  async waitForMcp(terminalId: string, ctx: PluginAgentToolContext, updates?: ContinuationInput) {
     const { binding } = await this.caller(ctx);
     const runId = this.state.runId, epoch = this.d.epoch();
     const env = await this.d.sdk.environments.get({ environmentId: binding.environmentId });
@@ -519,7 +544,7 @@ export class ConnectFlow {
           await this.save({ stage: 'error', retryable: true, message }, current);
           throw new Error(message);
         }
-        return this.freshVerification(ctx);
+        return this.freshVerification(ctx, updates);
       }
       await new Promise<void>((resolve, reject) => {
         const abort = () => { clearTimeout(timer); reject(new Error('cancelled')); };
@@ -532,7 +557,6 @@ export class ConnectFlow {
   }
 
   private savePairing(next: Pairing | null, valid = () => true): Promise<void> {
-    if (!this.d.proofs) return Promise.resolve();
     const previous = this.pairing;
     if (!valid()) return Promise.reject(new Error('Подключение изменилось.'));
     this.releasePairingAbort?.(); this.releasePairingAbort = null;
@@ -561,15 +585,14 @@ export class ConnectFlow {
   }
 
   /** Cabinet OAuth first. No native readiness is claimed by this tool. */
-  preparePairing(ctx: PluginAgentToolContext, reopenBrowser = false): Promise<PairingStart> {
-    if (!this.d.proofs) return Promise.reject(new Error('Серверное подтверждение недоступно в этом контуре.'));
+  preparePairing(ctx: PluginAgentToolContext, reopenBrowser = false, updates?: ContinuationInput): Promise<PairingStart> {
     if (ctx.threadId !== this.state.threadId) return Promise.reject(new Error('Этот разговор не выполняет текущее подключение svaib.'));
     if (this.pairingStarting) return this.pairingStarting;
-    this.pairingStarting = this.beginPairing(ctx, reopenBrowser).finally(() => { this.pairingStarting = null; });
+    this.pairingStarting = this.beginPairing(ctx, reopenBrowser, updates).finally(() => { this.pairingStarting = null; });
     return this.pairingStarting;
   }
 
-  private async beginPairing(ctx: PluginAgentToolContext, reopenBrowser: boolean): Promise<PairingStart> {
+  private async beginPairing(ctx: PluginAgentToolContext, reopenBrowser: boolean, updates?: ContinuationInput): Promise<PairingStart> {
     const { binding } = await this.caller(ctx);
     const runId = this.state.runId;
     let epoch = this.d.epoch();
@@ -578,6 +601,13 @@ export class ConnectFlow {
       JSON.stringify(this.state.binding) === JSON.stringify(binding) && this.d.epoch() === epoch;
     const check = () => { signal.throwIfAborted(); if (!valid()) throw new Error('Подключение изменилось.'); };
     check();
+    if (updates) {
+      const metadata = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: ctx.threadId })); check();
+      if (metadata.runId !== runId || !metadata.continuation) throw new Error('Нет исходной передачи этого подключения.');
+      const original = checkContinuation(metadata.continuation, binding.projectId, binding.environmentId);
+      const continuation = mergeContinuation(original, updates);
+      await this.d.sdk.threads.updatePluginMetadata({ threadId: ctx.threadId, set: { continuation } }); check();
+    }
     let account = await this.d.account(); check();
     if (account.state !== 'connected') {
       const own = this.pendingCabinet?.runId === runId && this.pendingCabinet.threadId === ctx.threadId && this.pendingCabinet.epoch === epoch;
@@ -600,7 +630,11 @@ export class ConnectFlow {
         message: 'Вход ожидает подтверждения. Повтори svaib_connect_begin без нового OAuth; вкладку открывай повторно только по просьбе пользователя.' };
       account = confirmed;
     }
-    const identity = await this.d.proofs!.identity(signal); check();
+    const identity = await this.d.proofs.identity(signal); check();
+    const metadata = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: ctx.threadId })); check();
+    const continuation = metadata.continuation ? checkContinuation(metadata.continuation, binding.projectId, binding.environmentId) : undefined;
+    if (continuation?.data.expectedAccountId && continuation.data.expectedAccountId !== identity.account_id)
+      throw new Error('Вход выполнен в другой аккаунт, чем указан в исходном поручении. Сохранённые входы не изменены; уточни, какой вход человек хочет использовать.');
     if (!account.me || accountIdentity(account.me) !== identity.account_id || identity.epoch !== epoch)
       throw new Error('Подключение изменилось.');
     await this.caller(ctx); check();
@@ -613,8 +647,8 @@ export class ConnectFlow {
     }
     const events = await this.d.sdk.threads.events.list({ threadId: ctx.threadId, order: 'desc', limit: '1' }); check();
     const sinceSeq = Math.max(0, ...events.map(event => event.seq));
-    const challenge = challengeSchema.parse(await this.d.proofs!.begin(signal)); check(); checkProofTime(challenge);
-    const after = await this.d.proofs!.identity(signal); check();
+    const challenge = challengeSchema.parse(await this.d.proofs.begin(signal)); check(); checkProofTime(challenge);
+    const after = await this.d.proofs.identity(signal); check();
     if (JSON.stringify(after) !== JSON.stringify(identity)) throw new Error('Подключение изменилось.');
     await this.caller(ctx); check();
     await this.savePairing({ state: 'active', runId, threadId: ctx.threadId, binding, epoch,
@@ -666,7 +700,7 @@ export class ConnectFlow {
     const snapshot = async () => {
       check(); checkProofTime(initial.challenge);
       await this.caller(ctx, false, true); check();
-      const identity = await this.d.proofs!.identity(signal); check();
+      const identity = await this.d.proofs.identity(signal); check();
       if (identity.account_id !== initial.accountId || identity.client_id !== initial.clientId || identity.epoch !== initial.epoch)
         throw new Error('Подключение изменилось.');
       const anchor = await nativePairingAnchor(this.d.sdk, ctx.threadId, initial.challenge, initial.sinceSeq); check();
@@ -681,7 +715,7 @@ export class ConnectFlow {
     let previousPhase: 'setup' | 'verify' = 'verify';
     try {
       const anchor = await snapshot();
-      const receipt = verifiedProofSchema.parse(await this.d.proofs!.verify(proof, signal)); check(); checkProofTime(receipt);
+      const receipt = verifiedProofSchema.parse(await this.d.proofs.verify(proof, signal)); check(); checkProofTime(receipt);
       if (receipt.nonce !== initial.challenge.nonce || receipt.account_id !== initial.accountId ||
           receipt.verifier_client_id !== initial.clientId || receipt.issuer_client_id === initial.clientId ||
           receipt.expires_at > initial.challenge.expires_at || receipt.issued_at < initial.challenge.issued_at)
@@ -731,114 +765,8 @@ export class ConnectFlow {
     }
   }
 
-  private async verifiedWhoami(subject: string, threadId: string): Promise<string> {
-    const proof = await readWhoamiProof(this.d.sdk, threadId, this.d.nativeProof);
-    if (!proof) throw new Error('Сначала выполни настоящий MCP whoami в этом разговоре. CLI, текст и проверка другого процесса не подходят.');
-    if (proof.subject !== subject) throw new Error('Переданный аккаунт не совпадает с результатом MCP whoami. Передай его точный account_id (если его нет — subject_id).');
-    return proof.subject;
-  }
-
-  async complete(subject: string, ctx: PluginAgentToolContext, reopenBrowser = false): Promise<CompletionResult> {
-    if (this.d.proofs) return this.completePairing(subject, ctx);
-    const readyRun = this.state.runId, readyEpoch = this.d.epoch();
-    if (this.state.stage === 'ready' && this.state.threadId === ctx.threadId && this.state.subject === subject && (await this.view()).stage === 'ready') {
-      ctx.signal.throwIfAborted();
-      await this.verifiedWhoami(subject, ctx.threadId);
-      ctx.signal.throwIfAborted();
-      if (this.state.runId !== readyRun || this.state.threadId !== ctx.threadId || this.d.epoch() !== readyEpoch) throw new Error('Подключение изменилось.');
-      return { connected: true, subject, threadId: ctx.threadId };
-    }
-    const { binding } = await this.caller(ctx);
-    if (this.completing) {
-      if (this.completionOwner?.threadId !== ctx.threadId || this.completionOwner.subject !== subject) throw new Error('Уже проверяется другой аккаунт. Дождись результата.');
-      return this.completing;
-    }
-    this.completionOwner = { threadId: ctx.threadId, subject };
-    const flight = this.finishCabinet(subject, ctx, binding.hostId, reopenBrowser);
-    this.completing = flight;
-    try { return await flight; } finally { if (this.completing === flight) { this.completing = null; this.completionOwner = null; } }
-  }
-
-  private async finishCabinet(subject: string, ctx: PluginAgentToolContext, hostId: string, reopenBrowser: boolean): Promise<CompletionResult> {
-    const runId = this.state.runId;
-    let epoch = this.d.epoch();
-    const signal = AbortSignal.any([ctx.signal, this.disposed.signal]);
-    const sameRun = () => this.state.runId === runId && this.state.threadId === ctx.threadId;
-    const current = () => sameRun() && this.d.epoch() === epoch;
-    const check = () => { signal.throwIfAborted(); if (!current()) throw new Error('Подключение изменилось.'); };
-    const verify = async () => {
-      check();
-      const account = await this.d.account(); check();
-      const proof = await this.verifiedWhoami(subject, ctx.threadId); check();
-      if (account.state !== 'connected' || !account.me || accountIdentity(account.me) !== proof) throw new Error('Аккаунты партнёра и кабинета различаются. Подключение остановлено; сохранённые входы не изменены.');
-    };
-    let workPhaseAttempted = false;
-    let previousPhase: 'setup' | 'verify' = 'setup';
-    const restorePhase = async () => {
-      if (!workPhaseAttempted || !sameRun()) return;
-      const metadata = connectionMetadataSchema.safeParse(await this.d.sdk.threads.getPluginMetadata({ threadId: ctx.threadId }));
-      if (sameRun() && metadata.success && metadata.data.runId === runId && metadata.data.phase === 'work') {
-        await this.d.sdk.threads.updatePluginMetadata({ threadId: ctx.threadId, set: { phase: previousPhase } });
-      }
-    };
-    try {
-      await this.verifiedWhoami(subject, ctx.threadId); check();
-      let account = await this.d.account();
-      check();
-      if (account.state !== 'connected') {
-        signal.throwIfAborted();
-        const own = this.pendingCabinet?.runId === runId && this.pendingCabinet.threadId === ctx.threadId && this.pendingCabinet.epoch === this.d.epoch();
-        if (account.state === 'waiting') {
-          if (!own) throw new Error('Другой вход в кабинет уже ожидает подтверждения. Заверши его на странице рабочего места.');
-          await this.save({ stage: 'cabinet', retryable: false, message: 'Подтверди вход в открывшемся браузере…' }, current); check();
-          if (reopenBrowser) await this.d.open(this.pendingCabinet!.url, hostId, signal);
-        } else {
-          if (this.pendingCabinet && !reopenBrowser) throw new Error('Время входа истекло или вход отменён. По просьбе пользователя повтори только вход кабинета с reopenBrowser.');
-          const { authorizationUrl } = await this.d.begin();
-          // Only this begin() may advance the OAuth generation once.
-          if (!sameRun() || this.d.epoch() !== epoch + 1) throw new Error('Подключение изменилось.');
-          epoch++; check();
-          this.pendingCabinet = { runId, threadId: ctx.threadId, epoch: this.d.epoch(), url: authorizationUrl };
-          await this.save({ stage: 'cabinet', retryable: false, message: 'Подтверди вход в открывшемся браузере…' }, current); check();
-          await this.d.open(authorizationUrl, hostId, signal);
-        }
-        check();
-        await this.save({ stage: 'cabinet', retryable: false, message: 'Подтверди вход в открывшемся браузере…' }, current); check();
-        const confirmed = await this.waitForCabinet(signal);
-        check();
-        if (!confirmed) return { connected: false, pending: true, step: 'cabinet', threadId: ctx.threadId,
-          message: 'Вход ожидает подтверждения в браузере. Повтори finish для проверки того же входа; не запускай новый OAuth. Открывай вкладку повторно только по просьбе пользователя через reopenBrowser.' };
-      }
-      const metadata = connectionMetadataSchema.safeParse(await this.d.sdk.threads.getPluginMetadata({ threadId: ctx.threadId })); check();
-      if (!metadata.success || metadata.data.runId !== runId) throw new Error('Подключение изменилось.');
-      previousPhase = metadata.data.phase === 'verify' ? 'verify' : 'setup';
-      await verify();
-      workPhaseAttempted = true;
-      await this.d.sdk.threads.updatePluginMetadata({ threadId: ctx.threadId, set: { phase: 'work' } });
-      await verify();
-      const provisional = { runId, threadId: ctx.threadId, previous: structuredClone(this.state) };
-      this.provisionalReady = provisional;
-      await this.save({ stage: 'ready', retryable: false, subject, message: 'svaib подключён' }, () => current() && !signal.aborted);
-      await verify();
-      if (this.provisionalReady === provisional) this.provisionalReady = null;
-      this.pendingCabinet = null;
-      this.d.changed(); check();
-      return { connected: true as const, subject, threadId: ctx.threadId };
-    } catch (error) {
-      if (!sameRun()) throw error;
-      // A tool's deadline or turn cancellation must not destroy the user's browser login.
-      if (signal.aborted && !workPhaseAttempted) throw new Error('Ожидание прервано. Текущий вход сохранён; продолжи проверку в этом разговоре.');
-      const message = error instanceof Error && /Аккаунты|Другой вход|Подключение изменилось|настоящий MCP whoami|не совпадает с результатом MCP/.test(error.message) ? error.message
-        : 'Вход в кабинет не завершён. Продолжи его в этом разговоре; если вкладка закрыта, попроси открыть её ещё раз.';
-      // Withdraw a known failed commit before awaiting metadata restoration.
-      const rollback = this.save({ stage: 'error', retryable: !/Аккаунты|Другой вход/.test(message), message }, sameRun);
-      if (this.provisionalReady?.runId === runId && this.provisionalReady.threadId === ctx.threadId) this.provisionalReady = null;
-      await rollback;
-      await restorePhase().catch(() => {});
-      throw new Error(message);
-    } finally {
-      if (this.provisionalReady?.runId === runId && this.provisionalReady.threadId === ctx.threadId) this.provisionalReady = null;
-    }
+  async complete(proof: string, ctx: PluginAgentToolContext): Promise<CompletionResult> {
+    return this.completePairing(proof, ctx);
   }
 
   private waitForCabinet(signal: AbortSignal): Promise<AccountView | null> {

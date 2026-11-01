@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useBbContext, useBbNavigate, useRpc } from '@get-bb/plugin-sdk/app';
-import type { rpcContract } from './server';
+import type { rpcContract } from './account-module';
 import { connectionCompose } from './connection';
 
 /** Old plugin links remain valid, but conversation UI belongs to BB. */
