@@ -41,10 +41,11 @@ type Dependencies = {
   waitSliceMs?: number;
   proofs: WorkplaceProofPort;
   open: (url: string, hostId: string, signal: AbortSignal) => Promise<void>;
+  prepareHooks?: (ctx: PluginAgentToolContext) => Promise<{ state: 'trusted'; changed: boolean } | { state: 'declined' }>;
   changed: () => void;
 };
 type CompletionResult = { connected: true; subject: string; threadId: string } |
-  { connected: false; pending: true; step: 'cabinet'; threadId: string; message: string };
+  { connected: false; pending: true; step: 'cabinet' | 'fresh'; threadId: string; message: string; handedOff?: true };
 
 /** One explicit user action owns installation, native verification and cabinet OAuth. */
 export class ConnectFlow {
@@ -499,6 +500,12 @@ export class ConnectFlow {
     if (metadata.runId !== runId || metadata.phase !== 'setup') throw new Error('Свежая проверка уже запущена или контекст изменился.');
     let continuation = metadata.continuation ? checkContinuation(metadata.continuation, binding.projectId, binding.environmentId) : undefined;
     if (updates) { if (!continuation) throw new Error('Нет исходной передачи.'); continuation = mergeContinuation(continuation, updates); }
+    if (binding.providerId === 'codex' && this.d.prepareHooks) {
+      const prepared = await this.d.prepareHooks(ctx);
+      if (prepared.state !== 'trusted') throw new Error('Доверие хукам svaib не подтверждено.');
+      await this.caller(ctx);
+      if (this.state.runId !== runId || this.state.threadId !== source.id) throw new Error('Подключение изменилось.');
+    }
     const defaults = await this.d.sdk.threads.defaultExecutionOptions({ threadId: source.id });
     if (this.state.runId !== runId || this.state.threadId !== source.id) throw new Error('Подключение изменилось. Повтори со страницы рабочего места.');
     const thread = await this.d.sdk.threads.spawn({ projectId: binding.projectId,
@@ -721,6 +728,18 @@ export class ConnectFlow {
     };
     let phaseAttempted = false;
     let previousPhase: 'setup' | 'verify' = 'verify';
+    const initialMetadata = connectionMetadataSchema.safeParse(await this.d.sdk.threads.getPluginMetadata({ threadId: ctx.threadId }));
+    check();
+    if (!initialMetadata.success || initialMetadata.data.runId !== initial.runId) throw new Error('Подключение изменилось.');
+    if (initialMetadata.data.phase === 'setup' && initial.binding.providerId === 'codex' && this.d.prepareHooks) {
+      const prepared = await this.d.prepareHooks(ctx); check();
+      await this.checkPairingBinding(initial, signal); check();
+      if (prepared.state !== 'trusted') throw new Error('Доверие хукам svaib не подтверждено.');
+      if (prepared.changed) {
+        const fresh = await this.freshVerification(ctx);
+        return { connected: false, pending: true, step: 'fresh', ...fresh };
+      }
+    }
     try {
       const anchor = await snapshot();
       const receipt = verifiedProofSchema.parse(await this.d.proofs.verify(proof, signal)); check(); checkProofTime(receipt);

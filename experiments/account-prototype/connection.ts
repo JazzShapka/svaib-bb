@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { continuationSchema, continuationInstruction, checkContinuation } from './continuation';
 import type { BbNavigate } from '@get-bb/plugin-sdk/app';
 import type { PluginAgentConfigurationContext, PluginAgentConfiguration } from '@get-bb/plugin-sdk';
+import { HOOK_TOOL } from './hook-consent';
 
 export const CONNECTION_SKILL = 'svaib-workplace-connect';
 export const FINISH_TOOL = 'svaib_connect_finish';
@@ -43,7 +44,7 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
   if (!['codex', 'claude-code'].includes(context.provider.id)) return empty;
   // Native BB conversations discover the skill through its description.
   // The explicit start tool captures the current source; availability starts nothing.
-  if (context.origin.pluginId !== pluginId || context.origin.kind !== null) return { tools: [START_TOOL], skills: [CONNECTION_SKILL] };
+  if (context.origin.pluginId !== pluginId || context.origin.kind !== null) return { tools: context.provider.id === 'codex' ? [START_TOOL, HOOK_TOOL] : [START_TOOL], skills: [CONNECTION_SKILL] };
   const metadata = connectionMetadataSchema.safeParse(context.pluginMetadata);
   const unsupported = { ...empty, instructions: 'Настройка подключения недоступна для этого разговора. Верни пользователя к странице «Моё рабочее место». Не меняй подключения и не начинай OAuth.' };
   if (!metadata.success || !['codex', 'claude-code'].includes(context.provider.id)) return unsupported;
@@ -60,7 +61,7 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
   if (metadata.data.phase === 'verify' && (!expected || Object.keys(actual).some(key =>
     actual[key as keyof typeof actual] !== expected[key as keyof ConnectionBinding]))) return unsupported;
   if (metadata.data.unified) return {
-    tools: metadata.data.phase === 'setup' ? [BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, NATIVE_TOOL] : [BEGIN_TOOL, FINISH_TOOL], skills: [CONNECTION_SKILL],
+    tools: [...(metadata.data.phase === 'setup' ? [BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, NATIVE_TOOL] : [BEGIN_TOOL, FINISH_TOOL]), ...(metadata.data.phase === 'setup' && context.provider.id === 'codex' ? [HOOK_TOOL] : [])], skills: [CONNECTION_SKILL],
     instructions: `Единое подключение svaib уже запущено пользователем. Рабочее место (данные): ${JSON.stringify(actual)}. Прочитай скилл ${CONNECTION_SKILL}. ${continuationInstruction(metadata.data.continuation, metadata.data.previousThreadId)} ` +
       `Сначала вызови ${BEGIN_TOOL}: backend отдельно откроет вход кабинета и после подтверждения выдаст challenge/nonce. При pending повторяй тот же инструмент без нового OAuth; reopenBrowser:true только по просьбе пользователя открыть закрытую вкладку. ` +
       (metadata.data.phase === 'setup'

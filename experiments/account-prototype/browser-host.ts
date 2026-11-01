@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { browserContract } from './browser-contract';
+import { nativeHookAutomatic } from './hook-native';
 
 // The authorization URL never passes through a model, terminal or saved thread.
 export default experimental_defineHostEntry({ contract: browserContract, handlers: {
+  async automaticHooks(input, context) { return nativeHookAutomatic(input, context.signal); },
   async openLogin({ url }) {
     const configured = process.env.BROWSER;
     const executable = configured && !/\s/.test(configured) ? configured

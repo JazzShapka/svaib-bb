@@ -12,6 +12,7 @@ import { browserContract } from './browser-contract';
 import { continuationInputSchema } from './continuation';
 import { opaqueProof } from './workplace-proof';
 import { NATIVE_TOOL, nativeStartSchema } from './native-login';
+import { createHookConsent, HOOK_TOOL } from './hook-consent';
 
 export const rpcContract = defineRpcContract({
   status: { input: z.object({ company_id: z.string().min(1).max(64) }).strict().nullable(), output: accountViewSchema },
@@ -36,7 +37,7 @@ export interface AccountModuleOptions {
   registerConfigure?: boolean;
 }
 export type AccountModuleApi = Pick<BbPluginApi,
-  'pluginId' | 'realtime' | 'onDispose' | 'hosts' | 'sdk' | 'storage' | 'agents' | 'events' | 'rpc'>;
+  'pluginId' | 'realtime' | 'onDispose' | 'hosts' | 'sdk' | 'storage' | 'agents' | 'events' | 'rpc' | 'ui'>;
 
 /** Composable backend. Settings/credentials remain owned by the containing factory. */
 export async function registerAccountModule(bb: AccountModuleApi, options: AccountModuleOptions) {
@@ -51,14 +52,19 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   const account = new AccountController(oauth, new SvaibApi(fetcher, apiBase), new SvaibMcp(fetcher, endpoints.resource));
   if (endpoints.resource !== 'https://api.svaib.com/mcp' || apiBase !== 'https://api.svaib.com') throw new Error('production_resource_required');
   const browser = bb.hosts.experimental_client({ contract: browserContract });
+  const reviewHooks = createHookConsent(bb);
   flow = new ConnectFlow({ sdk: bb.sdk, kv: bb.storage.kv, pluginId: bb.pluginId,
     account: () => account.view(), begin: () => oauth.begin(), cancel: () => oauth.cancel(), restartPending: epoch => oauth.restartPending(epoch), epoch: () => oauth.epoch, changed,
     open: async (url, hostId, signal) => { await browser.call('openLogin', { url }, { hostId, signal }); },
+    prepareHooks: ctx => reviewHooks(ctx),
     proofs: { identity: account.workplaceIdentity.bind(account), begin: account.beginWorkplaceProof.bind(account),
       verify: account.verifyWorkplaceProof.bind(account) },
   });
   await flow.load();
   const connection = flow;
+  bb.agents.registerTool({ name: HOOK_TOOL, description: 'Проверяет и автоматически подключает все хуки установленного svaib@svaib в текущем Codex; другие плагины не изменяются.',
+    parameters: z.object({}).strict(),
+    execute: async (_, ctx) => JSON.stringify(await reviewHooks(ctx)) });
   bb.onDispose(() => connection.dispose());
     bb.agents.registerTool({ name: BEGIN_TOOL, description: 'Начинает или проверяет вход кабинета svaib без заявления native готовности. После подтверждения возвращает серверный challenge для native MCP issue_workplace_proof. Токены и OAuth-ссылки не возвращает.',
       parameters: z.object({ continuation: continuationInputSchema.optional(), reopenBrowser: z.boolean().optional().describe('Только по просьбе пользователя повторно открыть закрытую вкладку.') }).strict(),
