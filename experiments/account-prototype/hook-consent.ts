@@ -1,7 +1,6 @@
 import type { BbPluginApi, PluginAgentToolContext } from '@get-bb/plugin-sdk';
 import { browserContract } from './browser-contract';
 
-export const HOOK_TOOL = 'svaib_codex_hooks';
 export function createHookConsent(bb: Pick<BbPluginApi, 'sdk' | 'hosts'>) {
   const host = bb.hosts.experimental_client({ contract: browserContract });
   const active = new Set<string>();

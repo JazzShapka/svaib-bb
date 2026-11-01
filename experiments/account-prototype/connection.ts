@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { continuationSchema, continuationInstruction, checkContinuation } from './continuation';
 import type { BbNavigate } from '@get-bb/plugin-sdk/app';
 import type { PluginAgentConfigurationContext, PluginAgentConfiguration } from '@get-bb/plugin-sdk';
-import { HOOK_TOOL } from './hook-consent';
+import { HOOK_TOOL } from './hook-bundle';
 
 export const CONNECTION_SKILL = 'svaib-workplace-connect';
 export const FINISH_TOOL = 'svaib_connect_finish';

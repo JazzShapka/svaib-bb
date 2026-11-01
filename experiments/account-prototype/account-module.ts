@@ -12,7 +12,8 @@ import { browserContract } from './browser-contract';
 import { continuationInputSchema } from './continuation';
 import { opaqueProof } from './workplace-proof';
 import { NATIVE_TOOL, nativeStartSchema } from './native-login';
-import { createHookConsent, HOOK_TOOL } from './hook-consent';
+import { createHookConsent } from './hook-consent';
+import { HOOK_TOOL } from './hook-bundle';
 
 export const rpcContract = defineRpcContract({
   status: { input: z.object({ company_id: z.string().min(1).max(64) }).strict().nullable(), output: accountViewSchema },
