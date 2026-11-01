@@ -100,7 +100,7 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     partnerIdentity: () => connection.partnerIdentity(),
     connect: async input => {
       const result = await connection.start(input);
-      if (result.threadId && result.stage !== 'error') await bb.sdk.threads.open({ threadId: result.threadId, file: null });
+      if (result.threadId) await bb.sdk.threads.open({ threadId: result.threadId, file: null });
       return result;
     },
     beginLogin: () => {

@@ -163,7 +163,7 @@ function ActionSetup({ workspace, action, context, backLabel, onBack, onStarted 
 type View = Place | { kind: "source"; sourceId: string; returnTo: Place } | { kind: "action"; action: Action; context?: ActionContext; returnTo: Place } | { kind: "thread"; threadId: string; title: string; returnTo: Place; metricsRefresh?: boolean };
 function EmptyWorkspaces() {
   const navigate = useBbNavigate();
-  return <section className="svb-empty" role="status"><Glyph name="Layers" /><h2>Продолжим настройку рабочего места</h2><p>Подключи партнёра и пройди онбординг своей компании.</p><button className="svb-primary-button" onClick={() => navigate.toPluginPanel('workplace', { subPath: 'settings/account' })}>Подключить svaib<Glyph name="ArrowUpRight" /></button></section>;
+  return <section className="svb-empty" role="status"><Glyph name="Layers" /><h2>Рабочие пространства</h2><p>Здесь появятся подключённые пространства. Работу с партнёром можно начать в обычном чате BB.</p><button className="svb-primary-button" onClick={() => navigate.toPluginPanel('workplace', { subPath: 'settings/account' })}>Мой svaib<Glyph name="ArrowUpRight" /></button></section>;
 }
 function WorkplaceRouter({ subPath = '' }: PluginNavPanelProps) {
   if (subPath === 'settings/account' || subPath.startsWith('settings/account/')) {

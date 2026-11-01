@@ -3,13 +3,12 @@ import { definePluginApp, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './account-module';
 import { accountIdentity, hasCompanyMembership, type AccountView } from './contracts';
 import type { PluginNavPanelProps } from '@get-bb/plugin-sdk/app';
-import { useBbContext, useBbNavigate } from '@get-bb/plugin-sdk/app';
+import { useBbContext } from '@get-bb/plugin-sdk/app';
 import type { ConnectFlowView } from './connect-flow';
 import { PartnerSetup } from './PartnerSetup';
 import './app.css';
 
 export function AccountPage({ production = false }: { production?: boolean } = {}) {
-  const navigate = useBbNavigate();
   const context = useBbContext();
   const rpc = useRpc<typeof rpcContract>();
   const [view, setView] = useState<AccountView | null>(null);
@@ -18,12 +17,12 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   const [busy, setBusy] = useState(false);
   const [companyId, setCompanyId] = useState('');
   const [companies, setCompanies] = useState<NonNullable<NonNullable<AccountView['me']>['companies']>>([]);
-  const blocked = connection?.stage === 'error' && connection.failure === 'native-technical';
+  const needsConnection = connection?.stage !== 'ready' && (view?.state !== 'connected' || !!connection?.threadId);
   const sequence = useRef(0);
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
     try {
-      const [account, flow] = await Promise.all([rpc.call('status', null), rpc.call('connectionStatus')]);
+      const [account, flow] = await Promise.all([rpc.call('status', null), rpc.call('connectionStatus').catch(() => null)]);
       const selected = companyId ? await rpc.call('status', { company_id: companyId }) : account;
       if (request !== sequence.current) return;
       setCompanies(account.me?.companies ?? []);
@@ -34,7 +33,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
         setError('Компания недоступна в этом подключении. Выбери доступную компанию и повтори.');
         return;
       }
-      setView(selected); setConnection(flow); setError('');
+      setView(selected); setConnection(flow); setError(flow ? '' : 'Не удалось загрузить статус настройки. Обнови страницу или начни обычный разговор в BB.');
     }
     catch { if (request === sequence.current) { setView(null); setCompanies([]); setError('Не удалось загрузить подключение. Повтори обновление.'); } }
   }, [rpc, companyId]);
@@ -54,32 +53,25 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     finally { setBusy(false); }
   }
   async function openConnection() {
-    if (blocked) {
-      if (connection?.threadId) navigate.toThread(connection.threadId);
-      return;
-    }
     // Recheck on every click: the conversation may have been deleted since refresh.
     const next = await rpc.call('connect', { projectId: context.projectId, threadId: context.threadId,
       ...(['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? { restartCabinet: true } : {}) });
     setConnection(next);
-    if (next.threadId && next.stage !== 'error') navigate.toThread(next.threadId);
+    if (!next.threadId && next.stage === 'error') setError(next.message);
   }
   return <div className="svaib-account-viewport"><main className="svaib-account">
     <header><span className="svaib-account-mark">s.</span><div><p className="svaib-account-eyebrow">{production ? 'svaib' : 'Тестовый контур · Staging'}</p><h1>Моё рабочее место</h1></div></header>
-    <p className="svaib-account-note">{production ? 'Подключи партнёра и продолжи работу со своими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
+    <p className="svaib-account-note">{production ? 'Работа с партнёром и твоими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
     <section><h2>Партнёр svaib</h2>
-      {connection?.stage === 'ready' ? <>
-        <p>Партнёр подключён. Можно продолжить разговор.</p>
-        <button className="svaib-account-button svaib-account-primary" disabled={busy} onClick={() => void act(openConnection)}>К партнёру</button>
-      </> : <>
+      {!needsConnection ? <p>{connection?.stage === 'ready' ? 'Партнёр подключён.' : 'Кабинет подключён.'} Начни обычный разговор в BB.</p> : <>
         <p>{view?.state === 'connected' ? 'Кабинет подключён. Осталось проверить доступ партнёра.' : 'Агент подготовит svaib к работе. Тебе останется подтвердить вход в браузере.'}</p>
         {connection?.message && <p role="status">{connection.message}</p>}
         {connection?.stage === 'cabinet' && <p>Код истёк или страница не открывается? «Продолжить подключение» откроет новый вход в браузере. Уже выполненные шаги сохранятся.</p>}
-        <button className="svaib-account-button svaib-account-primary" disabled={busy || !connection || (blocked && !connection.threadId)} onClick={() => void act(openConnection)}>{blocked ? 'К разговору' : ['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? 'Продолжить подключение' : ['setup', 'verify'].includes(connection?.stage ?? '') ? 'Открыть подключение' : 'Подключить svaib'}</button>
+        <button className="svaib-account-button svaib-account-primary" disabled={busy} onClick={() => void act(openConnection)}>{connection?.threadId ? 'Продолжить подключение' : 'Подключить svaib'}</button>
       </>}
     </section>
     {error && <p role="alert" className="svaib-account-error">{error}</p>}
-    {!view ? <p role="status">Проверяю подключение…</p> : <>
+    {!view ? !error && <p role="status">Проверяю подключение…</p> : <>
       {view.message && <p role="status">{view.message}</p>}
       {view.state === 'waiting' && connection?.stage !== 'cabinet' && <section><h2>Вход ожидает подтверждения</h2>
         <p>Подтверди его в уже открытом браузере или отмени незавершённый вход.</p>
@@ -110,13 +102,13 @@ export function AccountPage({ production = false }: { production?: boolean } = {
         {view.me.workspace?.repo ? <><p className="svaib-account-path">{view.me.workspace.repo}</p>
           <p>Профиль: {view.me.workspace.profile_path || 'ещё не указан'}</p></> : <p>Пространство ещё не подключено.</p>}
       </section>}
+    </>}
       <footer><button className="svaib-account-button" disabled={busy} onClick={() => void act(refresh)}>Обновить</button>
-        {view.state !== 'signed-out' && view.state !== 'waiting' && <button className="svaib-account-button" disabled={busy} onClick={() => void act(async () => {
+        {view && view.state !== 'signed-out' && view.state !== 'waiting' && <button className="svaib-account-button" disabled={busy} onClick={() => void act(async () => {
           const result = await rpc.call('logout'); await refresh();
           if (!result.revoked) setError('На этом BB подключение удалено. Серверный отзыв не подтверждён.');
         })}>Выйти из кабинета</button>}
       </footer>
-    </>}
   </main></div>;
 }
 

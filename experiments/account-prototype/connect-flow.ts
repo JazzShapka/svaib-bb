@@ -16,11 +16,10 @@ export const flowSchema = z.object({
   binding: connectionBindingSchema.nullable(), subject: z.string().nullable(),
   message: z.string(), retryable: z.boolean().default(false),
   verification: z.literal('signed-grants').optional(),
-  failure: z.literal('native-technical').optional(),
-}).strict();
+});
 export type ConnectFlowView = z.infer<typeof flowSchema>;
 export const startFlowSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().min(1).nullable(), restartCabinet: z.boolean().optional(), continuation: continuationInputSchema.optional() }).strict();
-const empty = (): ConnectFlowView => ({ stage: 'idle', runId: '', threadId: null, binding: null, subject: null, message: '', retryable: false, verification: undefined, failure: undefined });
+const empty = (): ConnectFlowView => ({ stage: 'idle', runId: '', threadId: null, binding: null, subject: null, message: '', retryable: false });
 const key = 'connection-flow-v1';
 const pairingKey = 'connection-flow-proof-v1'; // Same existing technical KV; no account progress or server store.
 const pairingOwner = z.object({ runId: z.string(), threadId: z.string(), binding: connectionBindingSchema,
@@ -90,7 +89,8 @@ export class ConnectFlow {
   private save(patch: Partial<ConnectFlowView>, valid = () => true): Promise<void> {
     if (!valid()) return Promise.reject(new Error('Подключение изменилось.'));
     const previous = this.state;
-    const next = flowSchema.parse({ ...this.state, ...patch });
+    const next = flowSchema.parse(Object.fromEntries(Object.entries({ ...this.state, ...patch })
+      .filter(([, value]) => value !== undefined)));
     this.state = next;
     const persist = async () => {
       if (!valid()) {
@@ -126,7 +126,7 @@ export class ConnectFlow {
             : 'Вход прервался. Нажми «Продолжить подключение», чтобы открыть новый вход.';
         const retryable = !native.technicalFailure;
         if (this.state.message !== message || this.state.retryable !== retryable || (native.running && this.state.stage !== 'setup'))
-          await this.save({ stage: native.running ? 'setup' : 'error', retryable, message, failure: native.technicalFailure ? 'native-technical' : undefined },
+          await this.save({ stage: native.running ? 'setup' : 'error', retryable, message },
             () => this.state.runId === owner.runId && this.state.threadId === owner.threadId);
       }
     }
@@ -217,7 +217,7 @@ export class ConnectFlow {
     this.completionOwner = null;
     this.verifying = null;
     await this.savePairing(null);
-    await this.save({ ...empty(), message: 'Разговор подключения удалён. Нажми «Подключить svaib»: агент проверит сохранённые входы в новом разговоре.' });
+    await this.save({ ...empty(), verification: undefined });
     // Cancel only the orphaned pending request, never a completed login or another flow.
     if (pending && pending.epoch === this.d.epoch() && (await this.d.account()).state === 'waiting' &&
         !this.state.runId && pending.epoch === this.d.epoch()) this.d.cancel();
@@ -247,7 +247,6 @@ export class ConnectFlow {
     this.startingSource = input.threadId;
     this.starting = (async () => {
       const current = await this.view();
-      if (current.failure === 'native-technical' && input.restartCabinet) return current;
       if (input.continuation && current.threadId) {
         const existing = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: current.threadId }));
         if (existing.continuation?.sourceThreadId !== input.threadId || existing.continuation.sourceProjectId !== input.projectId) {
@@ -281,6 +280,10 @@ export class ConnectFlow {
             (metadata.data.binding && !matchesBinding(metadata.data.binding)) ||
             (metadata.data.phase === 'verify' && !metadata.data.binding)) {
           throw new Error('Подключение изменилось: данные разговора не совпадают с текущим запуском.');
+        }
+        if (resumeNative) {
+          const native = await this.native.status({ runId, threadId, binding }); check();
+          if (native?.technicalFailure) return this.view();
         }
         // Check actual execution after the delayed metadata read, before any resume write.
         await this.caller({ threadId } as PluginAgentToolContext, true); check();
@@ -415,7 +418,7 @@ export class ConnectFlow {
         intent: 'Подключить svaib', scope: 'connection-only', nextStep: 'Проверить подключение', materials: [], constraints: [], agreements: [] } });
     const runId = randomUUID();
     await this.savePairing(null);
-    await this.save({ ...empty(), runId, stage: 'setup', message: 'Подключаю svaib…' });
+    await this.save({ ...empty(), verification: undefined, runId, stage: 'setup', message: 'Подключаю svaib…' });
     let createdThreadId: string | undefined;
     try {
       const thread = await sdk.threads.spawn({ projectId, environment, ...execution, ...(providerId ? { providerId } : {}),
@@ -546,7 +549,7 @@ export class ConnectFlow {
         if (terminal.exitCode !== 0) {
           const technicalFailure = terminal.exitCode === 20;
           const message = technicalFailure ? NATIVE_TECHNICAL_ERROR : 'Процесс входа партнёра завершился без подтверждения. Нажми «Продолжить подключение» на странице svaib в BB: повторится только незавершённый вход партнёра. Уже работающий вход кабинета сохранён.';
-          await this.save({ stage: 'error', retryable: !technicalFailure, message, failure: technicalFailure ? 'native-technical' : undefined }, current);
+          await this.save({ stage: 'error', retryable: !technicalFailure, message }, current);
           throw new Error(message);
         }
         return this.freshVerification(ctx, updates);
