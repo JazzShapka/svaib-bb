@@ -13,6 +13,10 @@ const recordSchema = z.object({ runId: z.string(), threadId: z.string(), binding
 type Record = z.infer<typeof recordSchema>;
 const key = 'connection-native-login-v1';
 export const NATIVE_TECHNICAL_ERROR = 'Не удалось проверить доступ партнёра. Вход кабинета сохранён. Продолжи в разговоре BB: повторный вход сейчас не поможет.';
+export const NATIVE_TERMINAL_MISSING = 'Прежний терминал входа больше недоступен. Проверим сохранённый доступ без повторного входа; данные и работающие входы сохранены.';
+class NativeTerminalMissing extends Error {}
+const exited = (terminal: Awaited<ReturnType<PluginBbSdk['terminals']['get']>>) =>
+  terminal.status === 'exited' && terminal.closeReason === 'process-exit' && terminal.exitCode !== null;
 
 /** Only terminals created here may receive Continue input. Their output is never read. */
 export class NativeLogin {
@@ -22,11 +26,24 @@ export class NativeLogin {
   async load() { const parsed = recordSchema.safeParse(await this.kv.get(key)); if (parsed.success) this.record = parsed.data; }
   owns(owner: Owner) { return !!this.record && this.record.runId === owner.runId && this.record.threadId === owner.threadId &&
     JSON.stringify(this.record.binding) === JSON.stringify(owner.binding); }
+  async terminalUnavailable() {
+    const record = this.record;
+    if (!record) return false;
+    const status = await this.status({ runId: record.runId, threadId: record.threadId, binding: record.binding });
+    return this.record === record && status?.unavailable === true;
+  }
   private async terminal(owner: Owner) {
     if (!this.owns(owner)) throw new Error('Этот процесс входа относится к другому подключению.');
     const record = this.record!;
-    const [terminal, environment] = await Promise.all([this.sdk.terminals.get({ terminalId: record.terminalId }),
-      this.sdk.environments.get({ environmentId: owner.binding.environmentId })]);
+    let terminal: Awaited<ReturnType<PluginBbSdk['terminals']['get']>>;
+    try { terminal = await this.sdk.terminals.get({ terminalId: record.terminalId }); }
+    catch (error) {
+      // The exact terminal-specific 404 is not proof that the old process has
+      // exited. Preserve its record and fence any replacement login.
+      if (error instanceof Error && /^HTTP 404: Terminal session not found\s*$/.test(error.message)) throw new NativeTerminalMissing(NATIVE_TERMINAL_MISSING);
+      throw error;
+    }
+    const environment = await this.sdk.environments.get({ environmentId: owner.binding.environmentId });
     if (!this.owns(owner) || this.record !== record || terminal.hostId !== owner.binding.hostId ||
         terminal.threadId !== owner.threadId || terminal.environmentId !== owner.binding.environmentId ||
         environment.hostId !== owner.binding.hostId || terminal.initialCwd !== environment.path)
@@ -35,9 +52,18 @@ export class NativeLogin {
   }
   async status(owner: Owner) {
     if (!this.owns(owner)) return null;
-    const { terminal, record } = await this.terminal(owner);
-    return { terminalId: terminal.id, running: ['running', 'starting'].includes(terminal.status), success: terminal.exitCode === 0,
-      retiring: record.retiring === true, technicalFailure: terminal.exitCode === 20 };
+    const expectedRecord = this.record;
+    let result: Awaited<ReturnType<NativeLogin['terminal']>>;
+    try { result = await this.terminal(owner); }
+    catch (error) {
+      if (error instanceof NativeTerminalMissing && this.record === expectedRecord && this.owns(owner)) return { terminalId: this.record!.terminalId,
+        running: false, success: false, retiring: this.record!.retiring === true, technicalFailure: false, unavailable: true };
+      throw error;
+    }
+    const { terminal, record } = result;
+    const running = ['running', 'starting'].includes(terminal.status);
+    return { terminalId: terminal.id, running, success: exited(terminal) && terminal.exitCode === 0,
+      retiring: record.retiring === true, technicalFailure: exited(terminal) && terminal.exitCode === 20, unavailable: !running && !exited(terminal) };
   }
   start(input: Input, owner: Owner, valid: () => Promise<void>) {
     if (this.starting) return this.starting.then(async result => {
@@ -55,6 +81,7 @@ export class NativeLogin {
       await valid();
     }
     const previous = await this.status(owner); await valid();
+    if (previous?.unavailable) throw new Error(NATIVE_TERMINAL_MISSING);
     if (previous && JSON.stringify(this.record!.input) !== JSON.stringify(input))
       throw new Error('Профиль текущего входа не совпал. Уже работающий вход не изменён.');
     if (previous?.running || previous?.success) return { terminalId: previous.terminalId, finished: previous.success,
@@ -96,8 +123,10 @@ export class NativeLogin {
     if (!this.record || (owner && !this.owns(owner))) return true;
     const record = this.record;
     const oldOwner = { runId: record.runId, threadId: record.threadId, binding: record.binding };
-    const { terminal } = await this.terminal(oldOwner);
-    if (!['running', 'starting'].includes(terminal.status)) return true;
+    let terminal: Awaited<ReturnType<NativeLogin['terminal']>>['terminal'];
+    try { ({ terminal } = await this.terminal(oldOwner)); }
+    catch (error) { if (error instanceof NativeTerminalMissing) return false; throw error; }
+    if (!['running', 'starting'].includes(terminal.status)) return exited(terminal);
     record.retiring = true;
     await this.kv.set(key, record);
     await this.sdk.terminals.input({ terminalId: terminal.id, dataBase64: Buffer.from('cancel\n').toString('base64') });
@@ -105,7 +134,7 @@ export class NativeLogin {
     // launch another native process while EOF/shutdown may still be pending.
     for (let check = 0; check < 10; check++) {
       const after = await this.terminal(oldOwner);
-      if (!['running', 'starting'].includes(after.terminal.status)) return true;
+      if (!['running', 'starting'].includes(after.terminal.status)) return exited(after.terminal);
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     return false;
@@ -121,6 +150,7 @@ export class NativeLogin {
       await this.sdk.terminals.input({ terminalId: terminal.id, dataBase64: Buffer.from('reopen\n').toString('base64') }); await valid();
       return { terminalId: terminal.id, finished: false, message: 'Продолжаю вход Codex. Уже работающий доступ сохранится.' };
     }
+    if (!exited(terminal)) throw new Error(NATIVE_TERMINAL_MISSING);
     if (terminal.exitCode === 0) return { terminalId: terminal.id, finished: true, message: 'Штатный вход завершён; теперь проверим доступ в BB.' };
     if (terminal.exitCode === 20) throw new Error(NATIVE_TECHNICAL_ERROR);
     return this.start(record.input, owner, valid);
