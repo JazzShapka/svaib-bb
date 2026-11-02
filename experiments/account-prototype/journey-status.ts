@@ -8,6 +8,7 @@ import { defineRpcContract, type PluginBbSdk } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { readScreenCompanyBinding } from '../../screen-native-context';
 import { nextOnboardingStages } from './onboarding-stages';
+import { validatePersistentFolder } from './folder-selection';
 import type { AccountView, OnboardingView } from './contracts';
 import type { ConnectFlowView } from './connect-flow';
 
@@ -20,11 +21,26 @@ export const journeyContract = defineRpcContract({
 });
 export type JourneyStatus = z.infer<typeof journeyStatusSchema>;
 type Dependencies = {
-  sdk: Pick<PluginBbSdk, 'threads' | 'environments' | 'hosts' | 'system'>;
+  sdk: Pick<PluginBbSdk, 'threads' | 'environments' | 'hosts' | 'system' | 'projects'>;
   account: { view(): Promise<AccountView>; onboarding(): Promise<OnboardingView>; companyOnboarding(id: string): Promise<OnboardingView> };
   flow: { view(): Promise<ConnectFlowView> };
   readCatalog?: (provider: string, cwd: string, sdk: Dependencies['sdk'], hostId: string) => Promise<unknown>;
+  /** Test-only: production uses the shared persistent-folder validator. */
+  validatePersistentRootForTesting?: (path: string, hostId: string,
+    env: Awaited<ReturnType<PluginBbSdk['environments']['get']>>) => Promise<string>;
 };
+
+async function hasPersistentProject(d: Dependencies, projectId: string,
+  env: Awaited<ReturnType<PluginBbSdk['environments']['get']>>): Promise<boolean> {
+  if (env.projectId !== projectId || env.workspaceProvisionType !== 'unmanaged' || !env.path) return false;
+  const project = await d.sdk.projects.get({ projectId });
+  if (project.id !== projectId || project.kind !== 'standard' || !project.sources.some(source =>
+    source.projectId === projectId && source.hostId === env.hostId && source.type === 'local_path' && source.path === env.path)) return false;
+  const root = d.validatePersistentRootForTesting
+    ? await d.validatePersistentRootForTesting(env.path, env.hostId, env)
+    : await validatePersistentFolder(d.sdk, env.hostId, env, env.path);
+  return root === env.path;
+}
 
 /** Read the active native method's own generated catalog. Never infer its version from BB. */
 export async function nativeCatalog(provider: string, cwd: string, sdk: Dependencies['sdk'], hostId: string, options?: {
@@ -126,7 +142,9 @@ export async function journeyStatus(d: Dependencies, context: { projectId: strin
     if (environment.status !== 'ready' || environment.hostId !== flow.binding.hostId ||
         environment.hostId !== system.primaryHostId || !environment.path) return out;
     out.workplace = true;
+    if (!await hasPersistentProject(d, thread.projectId, environment)) return out;
     const binding = await readScreenCompanyBinding(environment.path);
+    if (binding.realRoot !== environment.path) return out;
     const company = await d.account.companyOnboarding(binding.companyId);
     if (company.status !== 'available' || company.onboarding.marks['user.space']?.state !== 'done') return out;
     // The mark records a completed stage; independently confirm the actual bound files remain readable.
@@ -143,16 +161,25 @@ export async function journeyStatus(d: Dependencies, context: { projectId: strin
     let catalog: unknown = null;
     try { catalog = await (d.readCatalog ?? nativeCatalog)(thread.providerId, environment.path, d.sdk, environment.hostId); }
     catch { /* The workspace can be ready even if its native stage catalog is unavailable. */ }
-    const [currentFlow, currentThread, currentBinding, currentCompany] = await Promise.all([
+    const [currentFlow, currentThread, currentBinding, currentCompany, currentEnvironment] = await Promise.all([
       d.flow.view(), d.sdk.threads.get({ threadId }), readScreenCompanyBinding(environment.path),
-      d.account.companyOnboarding(binding.companyId),
+      d.account.companyOnboarding(binding.companyId), d.sdk.environments.get({ environmentId: thread.environmentId }),
     ]);
     if (currentFlow.stage !== 'ready' || currentFlow.runId !== flow.runId || currentFlow.subject !== flow.subject ||
         JSON.stringify(currentFlow.binding) !== JSON.stringify(flow.binding) || currentThread.deletedAt ||
         currentThread.projectId !== thread.projectId || currentThread.environmentId !== thread.environmentId ||
         currentThread.providerId !== thread.providerId || currentBinding.realRoot !== binding.realRoot ||
         currentBinding.companyId !== binding.companyId || currentCompany.status !== 'available' ||
-        JSON.stringify(currentCompany.onboarding) !== JSON.stringify(company.onboarding) || currentCompany.role !== company.role) return out;
+        JSON.stringify(currentCompany.onboarding) !== JSON.stringify(company.onboarding) || currentCompany.role !== company.role ||
+        currentEnvironment.id !== environment.id || currentEnvironment.status !== 'ready' || currentEnvironment.path !== environment.path ||
+        currentEnvironment.hostId !== environment.hostId || !await hasPersistentProject(d, thread.projectId, currentEnvironment)) return out;
+    const [lastFlow, lastThread, lastCompany] = await Promise.all([
+      d.flow.view(), d.sdk.threads.get({ threadId }), d.account.companyOnboarding(binding.companyId),
+    ]);
+    if (lastFlow.stage !== 'ready' || lastFlow.runId !== flow.runId || lastFlow.subject !== flow.subject ||
+        JSON.stringify(lastFlow.binding) !== JSON.stringify(flow.binding) || lastThread.deletedAt ||
+        lastThread.projectId !== thread.projectId || lastThread.environmentId !== thread.environmentId || lastThread.providerId !== thread.providerId ||
+        lastCompany.status !== 'available' || JSON.stringify(lastCompany.onboarding) !== JSON.stringify(company.onboarding) || lastCompany.role !== company.role) return out;
     out.space = true;
     out.firstWork = currentCompany.onboarding.marks['user.profile']?.state === 'done' &&
       currentCompany.onboarding.marks['user.first-work']?.state === 'done';

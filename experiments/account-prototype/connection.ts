@@ -21,7 +21,7 @@ export const connectionMetadataSchema = z.object({
   phase: z.enum(['setup', 'verify', 'work']),
   binding: connectionBindingSchema.optional(),
   continuation: continuationSchema.optional(), previousThreadId: z.string().optional(), successorThreadId: z.string().optional(),
-  unified: z.boolean().optional(), runId: z.string().optional(), targetHostId: z.string().optional(),
+  unified: z.boolean().optional(), runId: z.string().optional(), targetHostId: z.string().optional(), verifyExistingOnly: z.boolean().optional(),
 }).strict();
 export const connectionThreadSchema = connectionBindingSchema.extend({ threadId: z.string().min(1) }).strict();
 export type ConnectionThread = z.infer<typeof connectionThreadSchema>;
@@ -60,6 +60,11 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
   const expected = metadata.data.binding;
   if (metadata.data.phase === 'verify' && (!expected || Object.keys(actual).some(key =>
     actual[key as keyof typeof actual] !== expected[key as keyof ConnectionBinding]))) return unsupported;
+  const workspaceNote = metadata.data.continuation?.data.scope === 'onboarding'
+    ? context.environment.workspaceProvisionType === 'personal'
+      ? 'Это временная служебная папка BB, а не выбранная пользователем постоянная папка организации. Не предлагай размещать в ней материалы компании: BB может удалить её после удаления или архивирования всех связанных разговоров. Помоги пользователю выбрать постоянную папку и открыть её как рабочее место BB. '
+      : 'Папка проекта BB сама по себе не подтверждает, что пользователь выбрал её для пространства организации. Учитывай уже подтверждённый выбор; иначе уточни его. '
+    : '';
   if (metadata.data.unified) return {
     tools: [...(metadata.data.phase === 'setup' ? [BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, NATIVE_TOOL] : [BEGIN_TOOL, FINISH_TOOL]), ...(metadata.data.phase === 'setup' && context.provider.id === 'codex' ? [HOOK_TOOL] : [])], skills: [CONNECTION_SKILL],
     instructions: `Единое подключение svaib уже запущено пользователем. Рабочее место (данные): ${JSON.stringify(actual)}. Прочитай скилл ${CONNECTION_SKILL}. ${continuationInstruction(metadata.data.continuation, metadata.data.previousThreadId)} ` +
@@ -68,7 +73,7 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
         ? `Проверь методологический пакет и native MCP выбранного харнеса по скиллу. При необходимости установи именно объявленный источник и выполни штатный вход. После непосредственной OAuth-команды в persistent-терминале вызывай ${WAIT_TOOL} с terminalId; при pending жди тем же инструментом, без нового входа. Если нужна свежая сессия, вызови ${FRESH_TOOL}; при handedOff закончи работу в исходном разговоре, не проси создавать или отправлять чат вручную. `
         : 'В этой свежей сессии не переустанавливай метод и не запускай MCP OAuth. ') +
       `Когда native MCP доступен, снова получи актуальный challenge/nonce через ${BEGIN_TOOL}, затем вызови настоящий MCP svaib issue_workplace_proof с ровно этими challenge и nonce. Его opaque proof передай в ${FINISH_TOOL} аргументом proof. Не разбирай receipt, не подменяй его account_id, текстом whoami или результатом внешнего CLI/HTTP-процесса; не отправляй receipt в Telegram. Backend проверяет подпись через свой вход. При истечении challenge получи новый без повторного OAuth. ` +
-      `Не считай два входа сопоставленными до connected:true. Подтверждение относится к свежему вызову под двумя OAuth grants, не аттестует бинарник или вечную авторизацию. До connected:true не разворачивай каркас и не меняй документы. После connected:true установочный режим окончен: перечитай профиль и get_account_setup и следуй только исходному объёму поручения из продолжения. При connection-only сообщи проверенный результат; онбординг продолжай только если он поручен. Company и Screen проверяются отдельно.`
+      `Не считай два входа сопоставленными до connected:true. Подтверждение относится к свежему вызову под двумя OAuth grants, не аттестует бинарник или вечную авторизацию. До connected:true не разворачивай каркас и не меняй документы. После connected:true установочный режим окончен: перечитай профиль и get_account_setup и следуй только исходному объёму поручения из продолжения. При connection-only сообщи проверенный результат; онбординг продолжай только если он поручен. Company и Screen проверяются отдельно. ${workspaceNote}`
   };
   return unsupported;
 }

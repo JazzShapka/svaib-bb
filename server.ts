@@ -12,6 +12,7 @@ import { registerAccountModule } from './experiments/account-prototype/account-m
 import { journeyContract, journeyStatus } from './experiments/account-prototype/journey-status';
 import { CONNECTION_SKILL } from './experiments/account-prototype/connection';
 import { registerScreenModule } from './screen-module';
+import type { PersistentRootValidator } from './screen-native-context';
 
 const actionInput = z.object({ workspaceId: idSchema, actionId: idSchema, aspectId: aspectIdSchema.optional(), itemId: idSchema.optional() }).strict();
 const actionMetadata = actionInput.extend({ schema: z.literal(1) }).strict();
@@ -131,6 +132,15 @@ export function previewAction(config: WorkplaceConfig, workspaceId: WorkspaceId,
 }
 
 export default async function plugin(bb: BbPluginApi) {
+  return initializePlugin(bb);
+}
+
+/** Tests use an isolated temporary workspace; the production entrypoint never accepts an override. */
+export async function initializePluginForTesting(bb: BbPluginApi, validatePersistentRootForTesting: PersistentRootValidator) {
+  return initializePlugin(bb, validatePersistentRootForTesting);
+}
+
+async function initializePlugin(bb: BbPluginApi, validatePersistentRootForTesting?: PersistentRootValidator) {
   const settings = bb.settings.define({
     configPath: { type: 'string', label: 'Локальное описание пространств (абсолютный путь на BB-сервере)', default: '' },
     productionOAuthSession: { type: 'string', label: 'Подключение svaib (служебное, не редактировать)', secret: true },
@@ -169,7 +179,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(journeyContract, {
     journeyStatus: input => journeyStatus({ sdk: bb.sdk, account: account.account, flow: account.connection }, input),
   });
-  const screen = registerScreenModule(bb, { account });
+  const screen = registerScreenModule(bb, { account, validatePersistentRootForTesting });
   // No agent, source-content read, external write or schedule at plugin load.
   const workplaceConfiguration = (context: PluginAgentConfigurationContext): PluginAgentConfiguration => {
     const empty = { tools: [], skills: [] };

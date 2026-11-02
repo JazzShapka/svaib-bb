@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import type { PluginBbSdk, PluginKvStorage } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import type { ScreenContext } from './screen-transport';
+import { validatePersistentFolder } from './experiments/account-prototype/folder-selection';
 
 export type VerifiedScreenCompany = { account_id: string; company_id: string; subject_id: string; epoch: number };
 export interface ScreenAccountPort {
@@ -90,7 +91,11 @@ async function readCompanyBinding(environmentPath: string, allowUnbound: boolean
   }
 }
 
-type ContextOptions = { sdk: PluginBbSdk; kv: PluginKvStorage; account: ScreenAccountPort };
+export type PersistentRootValidator = (path: string, hostId: string,
+  environment: Awaited<ReturnType<PluginBbSdk['environments']['get']>>) => Promise<string>;
+type ContextOptions = { sdk: PluginBbSdk; kv: PluginKvStorage; account: ScreenAccountPort;
+  /** Test-only injection; production uses the shared persistent-folder validator. */
+  validatePersistentRootForTesting?: PersistentRootValidator };
 
 /** The plugin server and UI use one backend OAuth grant.
  * First use may select an actual company before scaffold files exist. Later use is pinned. */
@@ -106,15 +111,28 @@ export function createScreenPluginContext(options: ContextOptions) {
   async function native(threadId: string) {
     const thread = await options.sdk.threads.get({ threadId });
     if (thread.id !== threadId || thread.deletedAt || !thread.environmentId) throw new ScreenContextError('thread_unavailable', 'Разговору нужна действующая рабочая среда BB.');
-    const [environment, system] = await Promise.all([
+    const [environment, system, project] = await Promise.all([
       options.sdk.environments.get({ environmentId: thread.environmentId }), options.sdk.system.config(),
+      options.sdk.projects.get({ projectId: thread.projectId }),
     ]);
     if (environment.id !== thread.environmentId || environment.status !== 'ready')
       throw new ScreenContextError('workspace_unavailable', 'Рабочая среда BB ещё не готова. Повтори после её запуска.');
+    const chooseFolder = () => new ScreenContextError('workspace_selection_required', 'Для материалов организации нужна постоянная папка. В разговоре с партнёром нажми «Выбрать папку» рядом с полем ввода. Если кнопки нет, открой постоянную папку как проект BB. Файлы пока не меняются.');
+    if (environment.workspaceProvisionType !== 'unmanaged' || project.kind !== 'standard' || project.id !== thread.projectId ||
+        environment.projectId !== thread.projectId || !environment.path) throw chooseFolder();
     if (!system.primaryHostId || environment.hostId !== system.primaryHostId)
       throw new ScreenContextError('remote_host_unsupported', 'Этот Screen-кандидат работает на основном локальном компьютере BB. Удалённое рабочее место пока не подключено.');
-    if (!environment.path) throw new ScreenContextError('workspace_root_invalid', 'BB не предоставил рабочую папку.');
-    return { thread, environment, binding: await readCompanyBinding(environment.path, true) };
+    let selectedRoot: string;
+    try {
+      selectedRoot = await (options.validatePersistentRootForTesting
+        ? options.validatePersistentRootForTesting(environment.path, environment.hostId, environment)
+        : validatePersistentFolder(options.sdk, environment.hostId, environment, environment.path));
+    } catch { throw chooseFolder(); }
+    if (selectedRoot !== environment.path || !project.sources.some(source => source.type === 'local_path' && source.hostId === environment.hostId &&
+      source.projectId === project.id && source.path === selectedRoot)) throw chooseFolder();
+    const binding = await readCompanyBinding(environment.path, true);
+    if (binding.realRoot !== selectedRoot) throw chooseFolder();
+    return { thread, environment, binding };
   }
   async function resolveUnlocked(threadId: string, signal: AbortSignal, selector?: string) {
     if (!/^thr_[a-z0-9]+$/.test(threadId)) throw new ScreenContextError('invalid_thread', 'Неизвестный разговор BB.');
