@@ -9,6 +9,7 @@ import type { ActionContext, ActionPreview, Overview, SourceDocument, SourceRef,
 import { discoverSkills, enrichWorkspaceActions, type SkillCatalog } from './skills';
 import { applyMetricsUpdate } from './metrics-update';
 import { registerAccountModule } from './experiments/account-prototype/account-module';
+import { journeyContract, journeyStatus } from './experiments/account-prototype/journey-status';
 import { CONNECTION_SKILL } from './experiments/account-prototype/connection';
 import { registerScreenModule } from './screen-module';
 
@@ -165,6 +166,9 @@ export default async function plugin(bb: BbPluginApi) {
     read: async () => (await settings.get()).productionOAuthSession ?? '',
     write: async value => { await settings.experimental_set({ productionOAuthSession: value || null }); },
   } });
+  bb.rpc.register(journeyContract, {
+    journeyStatus: input => journeyStatus({ sdk: bb.sdk, account: account.account, flow: account.connection }, input),
+  });
   const screen = registerScreenModule(bb, { account });
   // No agent, source-content read, external write or schedule at plugin load.
   const workplaceConfiguration = (context: PluginAgentConfigurationContext): PluginAgentConfiguration => {

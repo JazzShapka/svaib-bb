@@ -19,6 +19,26 @@ export const flowSchema = z.object({
 });
 export type ConnectFlowView = z.infer<typeof flowSchema>;
 export const startFlowSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().min(1).nullable(), restartCabinet: z.boolean().optional(), continuation: continuationInputSchema.optional() }).strict();
+export const onboardingActionSchema = z.object({ projectId: z.string().min(1).nullable(), threadId: z.string().regex(/^thr_[a-z0-9]+$/).nullable(),
+  stepId: z.string().regex(/^[a-z][a-z0-9._-]{0,127}$/) }).strict();
+export const onboardingActionResultSchema = z.object({ threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict();
+type OnboardingAction = z.infer<typeof onboardingActionSchema>;
+type Binding = z.infer<typeof connectionBindingSchema>;
+const setupSteps = new Set(['workplace', 'account', 'space']);
+const journeyPrompt = (stepId: string) => `Пользователь попросил продолжить путь svaib. Выбранный этап: ${JSON.stringify(stepId)}. ` +
+  'Сначала проверь доступность скилла и MCP svaib именно в этой сессии. Если они недоступны, честно скажи об этом и попроси открыть новую сессию после подключения; не утверждай, что проверка среды подтверждает их доступность здесь. ' +
+  'Если подключение ещё выполняется, сначала заверши его проверку. Прочитай скилл svaib:onboarding ' +
+  'и продолжи с проверенного места, перечитай текущий профиль и get_account_setup. ' +
+  (setupSteps.has(stepId)
+    ? 'Помоги с выбранным шагом подготовки партнёра, аккаунта или пространства; проверяй только недостающее. ' +
+      'При необходимости помоги выбрать компанию и папку, согласовать структуру и проверить созданные файлы. '
+    : stepId === 'first-work'
+      ? 'По актуальному каталогу и отметкам онбординга помоги пройти недостающие зависимости и этапы user.profile и user.first-work в доступном порядке. first-work — название кнопки, не идентификатор каталога. Не запускай техническую настройку заново. '
+    : stepId === 'continue'
+      ? 'Прочитай актуальный каталог онбординга, определи ближайший применимый шаг по настоящим отметкам и предложи продолжить его; не запускай техническую настройку заново. '
+      : 'Найди выбранный этап в актуальном каталоге онбординга и помоги выполнить именно его; не запускай техническую настройку заново. ') +
+  'Сохрани исходные договорённости, не выбирай компанию или папку за пользователя и не переустанавливай работающие инструменты. ' +
+  'Не повторяй работающий вход; права компании и выбранную папку проверь отдельно.';
 const empty = (): ConnectFlowView => ({ stage: 'idle', runId: '', threadId: null, binding: null, subject: null, message: '', retryable: false });
 const key = 'connection-flow-v1';
 const pairingKey = 'connection-flow-proof-v1'; // Same existing technical KV; no account progress or server store.
@@ -51,6 +71,9 @@ type CompletionResult = { connected: true; subject: string; threadId: string } |
 export class ConnectFlow {
   private state = empty();
   private starting: Promise<ConnectFlowView> | null = null;
+  private onboardingStarting: Promise<z.infer<typeof onboardingActionResultSchema>> | null = null;
+  private onboardingRequest: string | null = null;
+  private lastOnboardingAction: { runId: string; threadId: string; stepId: string } | null = null;
   private startingSource: string | null = null;
   private completing: Promise<CompletionResult> | null = null;
   private completionOwner: { threadId: string; subject: string } | null = null;
@@ -239,15 +262,20 @@ export class ConnectFlow {
       ? { subject: view.subject, threadId } : { subject: null, threadId };
   }
 
-  start(input: z.infer<typeof startFlowSchema>): Promise<ConnectFlowView> {
+  start(input: z.infer<typeof startFlowSchema>, onboardingStep?: string, expectedTarget?: Binding, expectedProject?: string): Promise<ConnectFlowView> {
     input = startFlowSchema.parse(input);
     if (this.starting) {
+      if (expectedTarget || expectedProject) return Promise.reject(new Error('Подключение уже меняется. Повтори выбор рабочего места.'));
       if (input.continuation && input.threadId !== this.startingSource) return Promise.reject(new Error('Уже передаётся поручение из другого разговора.'));
       return this.starting;
     }
     this.startingSource = input.threadId;
     this.starting = (async () => {
       const current = await this.view();
+      if (expectedTarget || expectedProject) {
+        if (current.stage !== 'ready') throw new Error('Прежнее подключение изменилось. Сначала проверь доступ партнёра.');
+        return this.startNew(input, onboardingStep, expectedTarget, { runId: current.runId, threadId: current.threadId, epoch: this.d.epoch() }, expectedProject);
+      }
       if (input.continuation && current.threadId) {
         const existing = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: current.threadId }));
         if (existing.continuation?.sourceThreadId !== input.threadId || existing.continuation.sourceProjectId !== input.projectId) {
@@ -344,9 +372,120 @@ export class ConnectFlow {
           'Сохрани работающие входы.' }] }); check();
         return this.view();
       }
-      return this.startNew(input);
+      return this.startNew(input, onboardingStep);
     })().finally(() => { this.starting = null; this.startingSource = null; });
     return this.starting;
+  }
+
+  /** Explicit dashboard action; never infer a company or re-run a completed login. */
+  continueOnboarding(value: OnboardingAction): Promise<z.infer<typeof onboardingActionResultSchema>> {
+    const input = onboardingActionSchema.parse(value);
+    const key = JSON.stringify(input);
+    if (this.onboardingStarting) {
+      if (key !== this.onboardingRequest) return Promise.reject(new Error('Уже открывается другой шаг. Дождись завершения.'));
+      return this.onboardingStarting;
+    }
+    this.onboardingRequest = key;
+    const run = (async () => {
+      if (this.starting) await this.starting;
+      let current = await this.view();
+      if (!current.threadId || !current.binding) {
+        current = await this.start({ projectId: input.projectId, threadId: input.threadId }, input.stepId);
+        if (!current.threadId || !current.binding || current.stage === 'error') throw new Error(current.message || 'Не удалось открыть путь svaib.');
+        return onboardingActionResultSchema.parse({ threadId: current.threadId });
+      }
+      const { threadId, binding, runId } = current;
+      let expectedEpoch = this.d.epoch();
+      if (input.threadId === threadId && input.projectId && input.projectId !== binding.projectId)
+        throw new Error('Выбранный разговор относится к другому проекту. Проверь рабочее место.');
+      if (input.threadId && input.threadId !== threadId) {
+        const source = await this.d.sdk.threads.get({ threadId: input.threadId });
+        if (!source || source.deletedAt || (input.projectId && source.projectId !== input.projectId) || !source.environmentId ||
+            !['codex', 'claude-code'].includes(source.providerId))
+          throw new Error('Этот разговор относится к другому рабочему месту. Открой путь в подходящем разговоре.');
+        if (source.projectId !== binding.projectId || source.environmentId !== binding.environmentId || source.providerId !== binding.providerId) {
+          if (current.stage !== 'ready') throw new Error('Сначала заверши текущее подключение; работающие входы сохранены.');
+          const sourceProjectId = source.projectId, sourceEnvironmentId = source.environmentId, sourceProviderId = source.providerId;
+          const env = await this.d.sdk.environments.get({ environmentId: sourceEnvironmentId });
+          const primaryHostId = (await this.d.sdk.system.config()).primaryHostId;
+          const target = connectionBindingSchema.parse({ projectId: sourceProjectId, environmentId: sourceEnvironmentId, hostId: env.hostId, providerId: sourceProviderId });
+          const rechecked = await this.view();
+          if (env.id !== target.environmentId || env.status !== 'ready' || env.hostId !== primaryHostId ||
+              this.d.epoch() !== expectedEpoch || rechecked.stage !== 'ready' || rechecked.runId !== runId || rechecked.threadId !== threadId)
+            throw new Error('Рабочее место изменилось или недоступно. Открой локальный разговор и повтори.');
+          const next = await this.start({ projectId: target.projectId, threadId: input.threadId }, input.stepId, target);
+          if (!next.threadId || !next.binding || next.stage === 'error' ||
+              (['projectId', 'environmentId', 'hostId', 'providerId'] as const).some(key => next.binding![key] !== target[key]))
+            throw new Error(next.message || 'Не удалось проверить выбранное рабочее место.');
+          this.lastOnboardingAction = { runId: next.runId, threadId: next.threadId, stepId: input.stepId };
+          return onboardingActionResultSchema.parse({ threadId: next.threadId });
+        }
+        // The source may predate MCP installation, including a predecessor of
+        // the proof-bearing thread. Only the verified thread can run this step.
+      }
+      if (!input.threadId && input.projectId && input.projectId !== binding.projectId) {
+        if (current.stage !== 'ready') throw new Error('Сначала заверши текущее подключение; работающие входы сохранены.');
+        const next = await this.start({ projectId: input.projectId, threadId: null }, input.stepId, undefined, input.projectId);
+        if (!next.threadId || !next.binding || next.stage === 'error' || next.binding.projectId !== input.projectId)
+          throw new Error(next.message || 'Не удалось проверить выбранное рабочее место.');
+        this.lastOnboardingAction = { runId: next.runId, threadId: next.threadId, stepId: input.stepId };
+        return onboardingActionResultSchema.parse({ threadId: next.threadId });
+      }
+      if (current.stage === 'error' && !current.retryable) throw new Error(current.message || 'Сначала восстанови подключение.');
+      if (!['setup', 'verify', 'cabinet', 'ready', 'error'].includes(current.stage)) throw new Error(current.message || 'Сначала восстанови подключение.');
+      await this.checkPairingBinding({ threadId, binding }, this.disposed.signal);
+      const metadata = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId }));
+      if (metadata.runId !== runId || (current.stage === 'ready' && metadata.phase !== 'work'))
+        throw new Error('Разговор подключения изменился. Обнови страницу.');
+      const stable = () => this.state.runId === runId && this.state.threadId === threadId &&
+        this.d.epoch() === expectedEpoch && !this.disposed.signal.aborted;
+      if (!stable()) throw new Error('Подключение изменилось. Обнови страницу.');
+      if (['setup', 'verify', 'cabinet'].includes(current.stage) && this.lastOnboardingAction?.runId === runId &&
+          this.lastOnboardingAction.threadId === threadId && this.lastOnboardingAction.stepId === input.stepId)
+        return onboardingActionResultSchema.parse({ threadId });
+      // The setup prompt already contains the complete onboarding assignment.
+      // Reopening it must not queue duplicates or interrupt a question to the user.
+      if (['setup', 'verify', 'cabinet'].includes(current.stage) && setupSteps.has(input.stepId) && metadata.continuation?.data.scope === 'onboarding')
+        return onboardingActionResultSchema.parse({ threadId });
+      // An explicit request can extend a connection-only run; never discard another task or its source.
+      if (metadata.continuation && (metadata.continuation.captured || !metadata.continuation.sourceThreadId) && metadata.continuation.data.scope === 'connection-only') {
+        const continuation = { ...metadata.continuation, captured: true, data: { ...metadata.continuation.data, scope: 'onboarding' as const,
+          nextStep: 'Продолжить настройку пространства после подключения' } };
+        await this.d.sdk.threads.updatePluginMetadata({ threadId, set: { continuation } });
+        if (!stable()) throw new Error('Подключение изменилось. Обнови страницу.');
+      }
+      if (current.stage === 'error') {
+        // Resume the existing owner with its existing receiver/grants; start() only
+        // reopens a cabinet login when that particular login actually expired.
+        const resumed = await this.start({ projectId: binding.projectId, threadId: null, restartCabinet: true });
+        if (resumed.threadId !== threadId || resumed.runId !== runId || resumed.stage === 'error')
+          throw new Error(resumed.message || 'Не удалось продолжить подключение.');
+        expectedEpoch = this.d.epoch();
+      }
+      await this.checkPairingBinding({ threadId, binding }, this.disposed.signal);
+      if (current.stage === 'ready') {
+        const rechecked = await this.view();
+        if (rechecked.stage !== 'ready' || rechecked.runId !== runId || rechecked.threadId !== threadId)
+          throw new Error('Подключение изменилось. Сначала проверь доступ партнёра.');
+      }
+      if (!stable()) throw new Error('Подключение изменилось. Обнови страницу.');
+      const target = await this.d.sdk.threads.get({ threadId });
+      const previous = this.lastOnboardingAction;
+      if (!stable() || !target || target.deletedAt || target.projectId !== binding.projectId ||
+          target.environmentId !== binding.environmentId || target.providerId !== binding.providerId ||
+          target.originPluginId !== this.d.pluginId)
+        throw new Error('Разговор или рабочее место изменились. Обнови страницу.');
+      if (previous?.runId === runId && previous.threadId === threadId && previous.stepId === input.stepId &&
+          ['starting', 'active'].includes(target.status))
+        return onboardingActionResultSchema.parse({ threadId });
+      await this.d.sdk.threads.send({ threadId, mode: 'queue-if-active', input: [{ type: 'text', mentions: [], text: journeyPrompt(input.stepId) }] });
+      this.lastOnboardingAction = { runId, threadId, stepId: input.stepId };
+      if (!stable()) throw new Error('Подключение изменилось после передачи поручения. Проверь открытый разговор.');
+      return onboardingActionResultSchema.parse({ threadId });
+    })();
+    this.onboardingStarting = run;
+    void run.finally(() => { if (this.onboardingStarting === run) { this.onboardingStarting = null; this.onboardingRequest = null; } }).catch(() => {});
+    return run;
   }
 
   async startNative(input: z.infer<typeof nativeStartSchema>, ctx: PluginAgentToolContext) {
@@ -372,7 +511,8 @@ export class ConnectFlow {
       () => this.state.runId === runId && this.state.threadId === ctx.threadId && this.d.epoch() === epoch);
     return { ...native, pending: true as const };
   }
-  private async startNew(input: z.infer<typeof startFlowSchema>) {
+  private async startNew(input: z.infer<typeof startFlowSchema>, onboardingStep?: string, expectedTarget?: Binding,
+    expectedOwner?: { runId: string; threadId: string | null; epoch: number }, expectedProject?: string) {
     const { sdk } = this.d;
     // Explicitly starting another flow retires only our old unfinished helper.
     // Its record remains until real process exit; native.start enforces that fence.
@@ -392,9 +532,20 @@ export class ConnectFlow {
       if (!source.environmentId) throw new Error('Рабочее место ещё не готово. Повтори подключение после его запуска.');
       const env = await sdk.environments.get({ environmentId: source.environmentId });
       if (env.hostId !== primaryHostId) throw new Error('Этот вариант подключения пока работает только с локальным BB.');
+      if (expectedTarget && (source.deletedAt || env.status !== 'ready' || env.id !== source.environmentId ||
+          source.projectId !== expectedTarget.projectId || source.environmentId !== expectedTarget.environmentId ||
+          source.providerId !== expectedTarget.providerId || env.hostId !== expectedTarget.hostId))
+        throw new Error('Выбранное рабочее место изменилось. Повтори действие.');
       projectId = source.projectId; sourceEnvironmentId = env.id;
       providerId = source.providerId;
       const defaults = await sdk.threads.defaultExecutionOptions({ threadId: source.id });
+      if (expectedTarget) {
+        const again = await sdk.threads.get({ threadId: source.id });
+        if (!again || again.deletedAt || again.projectId !== expectedTarget.projectId ||
+            again.environmentId !== expectedTarget.environmentId || again.providerId !== expectedTarget.providerId ||
+            (await sdk.system.config()).primaryHostId !== expectedTarget.hostId)
+          throw new Error('Выбранный разговор изменился. Повтори действие.');
+      }
       if (defaults) execution = { model: defaults.model, permissionMode: defaults.permissionMode, reasoningLevel: defaults.reasoningLevel, serviceTier: defaults.serviceTier };
       environment = { type: 'reuse', environmentId: env.id };
     } else {
@@ -404,6 +555,8 @@ export class ConnectFlow {
       }
       if (!projectId) throw new Error('Открой проект или личный разговор BB и повтори подключение.');
       const project = await sdk.projects.get({ projectId });
+      if (expectedProject && (project.id !== expectedProject || projectId !== expectedProject))
+        throw new Error('Выбранный проект изменился. Повтори действие.');
       if (project.kind === 'personal') environment = { type: 'host', hostId: primaryHostId, workspace: { type: 'personal' } };
       else {
         const source = project.sources.find(s => s.isDefault);
@@ -414,16 +567,39 @@ export class ConnectFlow {
       if (defaults) { providerId = defaults.providerId; execution = { ...defaults }; }
     }
     if (providerId && !['codex', 'claude-code'].includes(providerId)) throw new Error('Для подключения svaib выбери в BB Codex или Claude Code.');
+    const onboarding = onboardingStep ? { intent: 'По кнопке продолжить выбранный этап пути svaib; прежнее содержимое исходного разговора не передано', scope: 'onboarding' as const,
+      nextStep: `После проверки продолжить выбранный этап ${onboardingStep}`, materials: [], constraints: [], agreements: [] } : undefined;
     const continuation: Continuation = continuationSchema.parse({ version: 1,
-      sourceThreadId: input.threadId, captured: !!input.continuation, sourceProjectId: projectId, sourceEnvironmentId, data: input.continuation ?? {
+      sourceThreadId: input.threadId, captured: !!input.continuation || !!onboarding, sourceProjectId: projectId, sourceEnvironmentId, data: input.continuation ?? onboarding ?? {
         intent: 'Подключить svaib', scope: 'connection-only', nextStep: 'Проверить подключение', materials: [], constraints: [], agreements: [] } });
     const runId = randomUUID();
+    if (expectedOwner && (expectedTarget || expectedProject)) {
+      const ready = await this.view();
+      if (ready.stage !== 'ready' || ready.runId !== expectedOwner.runId || ready.threadId !== expectedOwner.threadId ||
+          this.d.epoch() !== expectedOwner.epoch)
+        throw new Error('Подключение или выбранный разговор изменились. Повтори действие.');
+      if (expectedTarget) {
+        const again = await sdk.threads.get({ threadId: input.threadId! });
+        if (!again || again.deletedAt || again.projectId !== expectedTarget.projectId ||
+            again.environmentId !== expectedTarget.environmentId || again.providerId !== expectedTarget.providerId)
+          throw new Error('Подключение или выбранный разговор изменились. Повтори действие.');
+      } else if (expectedProject) {
+        const project = await sdk.projects.get({ projectId: expectedProject });
+        if (project.id !== expectedProject || (project.kind !== 'personal' && !project.sources.some(s => s.isDefault && s.hostId === primaryHostId)) ||
+            (await sdk.system.config()).primaryHostId !== primaryHostId || this.d.epoch() !== expectedOwner.epoch ||
+            this.state.runId !== expectedOwner.runId || this.state.threadId !== expectedOwner.threadId)
+          throw new Error('Выбранный проект или подключение изменились. Повтори действие.');
+      }
+    }
     await this.savePairing(null);
     await this.save({ ...empty(), verification: undefined, runId, stage: 'setup', message: 'Подключаю svaib…' });
     let createdThreadId: string | undefined;
     try {
       const thread = await sdk.threads.spawn({ projectId, environment, ...execution, ...(providerId ? { providerId } : {}),
-        title: 'Подключение svaib', prompt: 'Подключи svaib целиком: партнёра и кабинет. Выполни техническую настройку сам; мне оставь подтверждение входа в браузере.' + continuationPrompt(continuation),
+        title: 'Подключение svaib', prompt: 'Подключи svaib целиком: партнёра и кабинет. Выполни техническую настройку сам; мне оставь подтверждение входа в браузере.' +
+          (onboardingStep ? ` После подключения: ${journeyPrompt(onboardingStep)}` : '') +
+          continuationPrompt(onboardingStep && !input.continuation ? { ...continuation, sourceThreadId: null } : continuation) +
+          (onboardingStep && !input.continuation && input.threadId ? ' Исходный разговор указан только для выбора рабочего места. Его содержимое и договорённости не переданы; не читай его переписку и ничего из неё не предполагай. Выполни только выбранный пользователем этап.' : ''),
         pluginMetadata: { schema: 1, task: 'svaib-connect', phase: 'setup', unified: true, runId, continuation, targetHostId: primaryHostId },
       });
       createdThreadId = thread.id;
@@ -432,6 +608,22 @@ export class ConnectFlow {
       const { current, env } = await this.waitForWorkspace(thread.id);
       const binding = connectionBindingSchema.parse({ projectId: current.projectId, environmentId: env.id, hostId: env.hostId, providerId: current.providerId });
       if (binding.hostId !== primaryHostId) throw new Error('BB выбрал другое рабочее место. Подключение остановлено.');
+      if ((expectedTarget || expectedProject) && (current.id !== thread.id || current.deletedAt ||
+          current.environmentId !== env.id || current.originPluginId !== this.d.pluginId))
+        throw new Error('BB выбрал другое рабочее место. Подключение остановлено.');
+      if (expectedProject && (binding.projectId !== expectedProject || !['codex', 'claude-code'].includes(binding.providerId)))
+        throw new Error('BB выбрал другой проект или неподдерживаемый агент. Подключение остановлено.');
+      if (expectedTarget && (['projectId', 'environmentId', 'hostId', 'providerId'] as const).some(key => binding[key] !== expectedTarget[key]))
+        throw new Error('BB выбрал другое рабочее место. Подключение остановлено.');
+      if (expectedTarget || expectedProject) {
+        const again = await sdk.threads.get({ threadId: thread.id });
+        const finalEnv = await sdk.environments.get({ environmentId: binding.environmentId });
+        if (!again || again.deletedAt || again.id !== thread.id || again.originPluginId !== this.d.pluginId ||
+            again.projectId !== binding.projectId || again.environmentId !== binding.environmentId || again.providerId !== binding.providerId ||
+            finalEnv.id !== binding.environmentId || finalEnv.status !== 'ready' || finalEnv.hostId !== binding.hostId ||
+            (await sdk.system.config()).primaryHostId !== binding.hostId)
+          throw new Error('Рабочее место изменилось во время подготовки. Подключение остановлено.');
+      }
       await this.save({ threadId: thread.id, binding });
       return this.view();
     } catch {

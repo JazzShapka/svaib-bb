@@ -1,0 +1,33 @@
+.svaib-journey { min-width: 0; }
+.svaib-journey-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.svaib-account .svaib-journey h2 { margin: 0; font-size: 21px; }
+.svaib-journey-eyebrow { margin: 0 0 4px !important; color: #008b80; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.svaib-journey-intro { margin: 8px 0 18px !important; opacity: .75; }
+.svaib-journey-list, .svaib-journey-next-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.svaib-journey-step { display: flex; align-items: flex-start; gap: 13px; padding: 14px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 10px; }
+.svaib-journey-step--current { border-color: #00a99b; background: color-mix(in srgb, #00b4a6 7%, transparent); }
+.svaib-journey-number { flex: 0 0 28px; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 50%; font-size: 13px; font-weight: 700; }
+.svaib-journey-step--done .svaib-journey-number { color: #007c72; border-color: #00a99b; }
+.svaib-journey-step--current .svaib-journey-number { background: #00b4a6; color: #071e24; border-color: #00b4a6; }
+.svaib-journey-copy { flex: 1; min-width: 0; }
+.svaib-journey-step-header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; }
+.svaib-account .svaib-journey h3 { margin: 0; font-size: 15px; line-height: 1.4; }
+.svaib-journey-copy p { margin: 4px 0 0 !important; font-size: 13px; opacity: .76; overflow-wrap: anywhere; }
+.svaib-journey-status { color: inherit; font-size: 12px; opacity: .7; }
+.svaib-journey-action { display: inline-block; margin: 12px 0 0; padding: 9px 16px; border: 1px solid #00b4a6; border-radius: 9px; background: #00b4a6; color: #071e24; font: inherit; font-weight: 650; cursor: pointer; }
+.svaib-journey-action:disabled { opacity: .5; cursor: wait; }
+.svaib-journey-action:focus-visible, .svaib-journey-complete summary:focus-visible { outline: 3px solid #00a99b; outline-offset: 3px; }
+.svaib-journey-complete { margin-top: 16px; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 10px; }
+.svaib-journey-complete summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 12px 14px; cursor: pointer; list-style: none; }
+.svaib-journey-complete summary::-webkit-details-marker { display: none; }
+.svaib-journey-complete-mark { margin-right: 8px; color: #008b80; font-weight: 700; }
+.svaib-journey-details-label { font-size: 12px; text-decoration: underline; opacity: .75; }
+.svaib-journey-when-open, .svaib-journey-complete[open] .svaib-journey-when-closed { display: none; }
+.svaib-journey-complete[open] .svaib-journey-when-open { display: inline; }
+.svaib-journey-complete[open] .svaib-journey-list { padding: 0 12px 12px; }
+.svaib-journey-next { margin-top: 20px; }
+.svaib-journey-next-list { margin-top: 10px; }
+.svaib-journey-next-step { padding: 12px 14px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 10px; }
+.svaib-journey-next-step > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.svaib-journey-empty { font-size: 13px; opacity: .75; }
+@media (max-width: 480px) { .svaib-journey-step { padding: 12px; } .svaib-journey-action { width: 100%; } }

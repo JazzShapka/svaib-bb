@@ -57,6 +57,20 @@ export const accountViewSchema = z.object({
 });
 export type AccountView = z.infer<typeof accountViewSchema>;
 
+const stageId = z.string().max(64).regex(/^[a-z][a-z0-9-]*(\.[a-z0-9-]+)+$/);
+export const onboardingProgressSchema = z.object({
+  schema: z.literal(1),
+  marks: z.record(stageId, z.object({ state: z.enum(['done', 'waiting', 'unverified', 'skip', 'deferred']) }).strip()),
+  audience: z.string().max(32).regex(/^[a-z][a-z0-9-]*$/).nullable(),
+  tools: z.array(stageId).max(50),
+}).strip();
+export const onboardingViewSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('available'), onboarding: onboardingProgressSchema,
+    nextStep: z.string().max(320).nullable(), role: z.enum(['owner', 'member']).nullable() }).strict(),
+  z.object({ status: z.literal('unavailable'), onboarding: z.null(), nextStep: z.null(), role: z.null() }).strict(),
+]);
+export type OnboardingView = z.infer<typeof onboardingViewSchema>;
+
 export function verifyProfile(profile: unknown, me: Me): UiProfile {
   if (!hasCompanyMembership(me)) throw new Error('Для UI-профиля нужно подтверждённое участие в выбранной компании.');
   const parsed = profileSchema.parse(profile);

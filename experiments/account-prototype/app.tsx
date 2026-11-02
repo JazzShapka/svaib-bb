@@ -5,14 +5,18 @@ import { accountIdentity, hasCompanyMembership, type AccountView } from './contr
 import type { PluginNavPanelProps } from '@get-bb/plugin-sdk/app';
 import { useBbContext } from '@get-bb/plugin-sdk/app';
 import type { ConnectFlowView } from './connect-flow';
+import type { journeyContract, JourneyStatus } from './journey-status';
+import { OnboardingJourney, type SetupStep } from './OnboardingJourney';
 import { PartnerSetup } from './PartnerSetup';
 import './app.css';
 
 export function AccountPage({ production = false }: { production?: boolean } = {}) {
   const context = useBbContext();
   const rpc = useRpc<typeof rpcContract>();
+  const journeyRpc = useRpc<typeof journeyContract>();
   const [view, setView] = useState<AccountView | null>(null);
   const [connection, setConnection] = useState<ConnectFlowView | null>(null);
+  const [journey, setJourney] = useState<JourneyStatus | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [companyId, setCompanyId] = useState('');
@@ -22,10 +26,14 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
     try {
+      const progressRequest = journeyRpc.call('journeyStatus', { projectId: context.projectId ?? null, threadId: context.threadId ?? null }).catch(() => null);
       const [account, flow] = await Promise.all([rpc.call('status', null), rpc.call('connectionStatus').catch(() => null)]);
       const selected = companyId ? await rpc.call('status', { company_id: companyId }) : account;
       if (request !== sequence.current) return;
       setCompanies(account.me?.companies ?? []);
+      setJourney({ workplace: false, account: account.state === 'connected', space: false, firstWork: false,
+        nextStep: null, nextStages: [], stagesAvailable: false });
+      void progressRequest.then(progress => { if (request === sequence.current && progress) setJourney(progress); });
       if (companyId && (!account.me || !selected.me || selected.state !== 'connected' ||
           accountIdentity(account.me) !== accountIdentity(selected.me) || !hasCompanyMembership(selected.me) ||
           selected.me.tenant_id !== companyId)) {
@@ -36,10 +44,17 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       setView(selected); setConnection(flow); setError(flow ? '' : 'Не удалось загрузить статус настройки. Обнови страницу или начни обычный разговор в BB.');
     }
     catch { if (request === sequence.current) { setView(null); setCompanies([]); setError('Не удалось загрузить подключение. Повтори обновление.'); } }
-  }, [rpc, companyId]);
+  }, [rpc, journeyRpc, companyId, context.projectId, context.threadId]);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => () => { sequence.current++; }, []);
   useRealtime('account-changed', () => { void refresh(); });
+  // Account marks can also change outside BB, e.g. in Telegram. Re-read when
+  // the person returns to this window, without background polling.
+  useEffect(() => {
+    const onFocus = () => { void refresh(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refresh]);
   // Poll only during the interactive login; this is not an agent or a business-data sync.
   useEffect(() => {
     if (view?.state !== 'waiting' && !['setup', 'verify', 'cabinet'].includes(connection?.stage ?? '')) return;
@@ -59,17 +74,31 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     setConnection(next);
     if (!next.threadId && next.stage === 'error') setError(next.message);
   }
+  async function continueJourney(stepId: string) {
+    await rpc.call('continueOnboarding', { projectId: context.projectId ?? null, threadId: context.threadId ?? null, stepId });
+  }
+  const done = [!!journey?.workplace, !!journey?.account, !!journey?.space, !!journey?.firstWork];
+  const setupComplete = done.every(Boolean);
+  const activeStep = done.findIndex(value => !value);
+  const setup: SetupStep[] = [
+    { id: 'workplace', title: 'Подготовить партнёра', detail: 'Проверим рабочее место и доступ партнёра.', state: 'upcoming' },
+    { id: 'account', title: 'Войти в svaib', detail: 'Подключим твой аккаунт.', state: 'upcoming' },
+    { id: 'space', title: 'Подключить компанию и пространство', detail: 'Выберем компанию и подготовим место для её материалов.', state: 'upcoming' },
+    { id: 'first-work', title: 'Познакомиться и начать работу', detail: 'Расскажешь партнёру о себе и перейдёшь к первой задаче.', state: 'upcoming' },
+  ].map((step, index) => ({ ...step, state: done[index] ? 'done' : index === activeStep ? 'current' : 'upcoming' }));
   return <div className="svaib-account-viewport"><main className="svaib-account">
     <header><span className="svaib-account-mark">s.</span><div><p className="svaib-account-eyebrow">{production ? 'svaib' : 'Тестовый контур · Staging'}</p><h1>Моё рабочее место</h1></div></header>
     <p className="svaib-account-note">{production ? 'Работа с партнёром и твоими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
-    <section><h2>Партнёр svaib</h2>
+    {journey && <OnboardingJourney setup={setup} setupComplete={setupComplete} nextSteps={journey.nextStages} stagesAvailable={journey.stagesAvailable} busy={busy}
+      onContinue={stepId => { void act(() => continueJourney(stepId)); }} />}
+    {!journey && <section><h2>Партнёр svaib</h2>
       {!needsConnection ? <p>{connection?.stage === 'ready' ? 'Партнёр подключён.' : 'Кабинет подключён.'} Начни обычный разговор в BB.</p> : <>
         <p>{view?.state === 'connected' ? 'Кабинет подключён. Осталось проверить доступ партнёра.' : 'Агент подготовит svaib к работе. Тебе останется подтвердить вход в браузере.'}</p>
         {connection?.message && <p role="status">{connection.message}</p>}
         {connection?.stage === 'cabinet' && <p>Код истёк или страница не открывается? «Продолжить подключение» откроет новый вход в браузере. Уже выполненные шаги сохранятся.</p>}
         <button className="svaib-account-button svaib-account-primary" disabled={busy} onClick={() => void act(openConnection)}>{connection?.threadId ? 'Продолжить подключение' : 'Подключить svaib'}</button>
       </>}
-    </section>
+    </section>}
     {error && <p role="alert" className="svaib-account-error">{error}</p>}
     {!view ? !error && <p role="status">Проверяю подключение…</p> : <>
       {view.message && <p role="status">{view.message}</p>}

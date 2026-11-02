@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { accountIdentity, accountViewSchema, meSchema, visibleMeSchema, hasCompanyMembership, verifyProfile, type AccountView, type Me } from './contracts';
+import { accountIdentity, accountViewSchema, meSchema, visibleMeSchema, hasCompanyMembership, verifyProfile, onboardingProgressSchema, type OnboardingView, type AccountView, type Me } from './contracts';
 import { companySelector, SvaibApi } from './api';
 import { OAuthConnection } from './oauth';
 import { MCP_RESOURCE, SvaibMcp, type McpToolResult } from './mcp';
 import { challengeSchema, checkProofTime, opaqueProof, verifiedProofSchema, type WorkplaceIdentity } from './workplace-proof';
+import { continuationInputSchema } from './continuation';
 
 export interface VerifiedCompany { account_id: string; company_id: string; subject_id: string; epoch: number }
 export interface CompanyMcpRequest { name: string; arguments: Record<string, unknown> }
@@ -88,6 +89,63 @@ export class AccountController {
     if (!current || !client || !current.me.account_id || current.me.account_id !== accountIdentity(current.me))
       throw new AccountAccessError('reauthentication_required');
     return { account_id: current.me.account_id, client_id: client, epoch };
+  }
+
+  /** Account-level progress is separate from every company membership. */
+  async onboarding(signal?: AbortSignal): Promise<OnboardingView> {
+    const unavailable: OnboardingView = { status: 'unavailable', onboarding: null, nextStep: null, role: null };
+    try {
+      const identity = async () => {
+        const expected = await this.workplaceIdentity(signal);
+        const account = await this.account(undefined, signal);
+        if (!account || this.oauth.epoch !== expected.epoch || account.me.context !== 'account' ||
+            account.me.account_id !== expected.account_id || account.me.company_id || account.me.tenant_id ||
+            account.me.selected_company_id) throw new AccountAccessError('context_changed');
+        return expected;
+      };
+      const expected = await identity();
+      const token = await this.oauth.token();
+      if (!token || expected.epoch !== this.oauth.epoch) return unavailable;
+      const who = await this.mcp.callResult(token, 'whoami', {}, signal);
+      if (who.isError || !who.structuredContent || typeof who.structuredContent !== 'object') return unavailable;
+      const facts = who.structuredContent as Record<string, unknown>;
+      if (facts.context !== 'account' || facts.account_id !== expected.account_id || facts.company_id ||
+          facts.tenant_id || facts.selected_company_id) return unavailable;
+      const progress = onboardingProgressSchema.safeParse(facts.onboarding);
+      if (!progress.success) return unavailable;
+      let nextStep: string | null = null;
+      try {
+        const setup = await this.mcp.callResult(token, 'get_account_setup', {}, signal);
+        const value = setup.structuredContent as { account_id?: unknown; setup?: { next_step?: unknown } } | undefined;
+        if (!setup.isError && value?.account_id !== expected.account_id) return unavailable;
+        const next = value?.setup?.next_step;
+        const safe = continuationInputSchema.shape.nextStep.safeParse(next);
+        if (!setup.isError && value?.account_id === expected.account_id && safe.success && safe.data.length <= 320 &&
+            !/(?:password|passwd|парол|секрет|secret|api.?key|ключ|код\s+(?:входа|подтверждения)|bearer)/i.test(safe.data))
+          nextStep = safe.data;
+      } catch { signal?.throwIfAborted(); /* Setup is optional; identity is checked below. */ }
+      const actual = await identity();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) return unavailable;
+      return { status: 'available', onboarding: progress.data, nextStep, role: null };
+    } catch { signal?.throwIfAborted(); return unavailable; }
+  }
+
+  /** Membership progress is read with the existing checked company binding. */
+  async companyOnboarding(companyId: string, signal?: AbortSignal): Promise<OnboardingView> {
+    const unavailable: OnboardingView = { status: 'unavailable', onboarding: null, nextStep: null, role: null };
+    try {
+      const expected = await this.verifiedCompany(companyId, signal);
+      const who = await this.callMcpForContext({ name: 'whoami', arguments: {} }, expected, signal);
+      if (who.isError || !who.structuredContent || typeof who.structuredContent !== 'object') return unavailable;
+      const facts = who.structuredContent as Record<string, unknown>;
+      if (facts.context !== 'company' || facts.account_id !== expected.account_id ||
+          facts.company_id !== expected.company_id || facts.tenant_id !== expected.company_id ||
+          facts.selected_company_id !== expected.company_id || facts.subject_id !== expected.subject_id ||
+          !['owner', 'member'].includes(String(facts.role))) return unavailable;
+      const progress = onboardingProgressSchema.safeParse(facts.onboarding);
+      if (!progress.success) return unavailable;
+      return { status: 'available', onboarding: progress.data, nextStep: null, role: facts.role as 'owner' | 'member' };
+    } catch { signal?.throwIfAborted(); return unavailable; }
   }
 
   private async workplaceCall(name: 'begin_workplace_proof' | 'verify_workplace_proof', arguments_: Record<string, unknown>, signal?: AbortSignal) {
