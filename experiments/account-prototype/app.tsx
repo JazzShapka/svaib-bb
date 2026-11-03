@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useBbNavigate, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './account-module';
 import { accountIdentity, hasCompanyMembership, type AccountView } from './contracts';
 import type { PluginNavPanelProps } from '@get-bb/plugin-sdk/app';
@@ -8,11 +8,13 @@ import type { ConnectFlowView } from './connect-flow';
 import type { journeyContract, JourneyStatus } from './journey-status';
 import { OnboardingJourney, type SetupStep } from './OnboardingJourney';
 import { PartnerSetup } from './PartnerSetup';
+import { COMPANY_FOLDER_PROMPT } from './folder-contract';
 import './app.css';
 
 export function AccountPage({ production = false }: { production?: boolean } = {}) {
   const context = useBbContext();
   const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
   const journeyRpc = useRpc<typeof journeyContract>();
   const [view, setView] = useState<AccountView | null>(null);
   const [connection, setConnection] = useState<ConnectFlowView | null>(null);
@@ -75,6 +77,11 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     if (!next.threadId && next.stage === 'error') setError(next.message);
   }
   async function continueJourney(stepId: string) {
+    if (stepId === 'space') {
+      if (connection?.stage !== 'ready' || !connection.binding) throw new Error('Сначала заверши подключение партнёра.');
+      navigate.toCompose({ hostId: connection.binding.hostId, initialPrompt: COMPANY_FOLDER_PROMPT, focusPrompt: false });
+      return;
+    }
     await rpc.call('continueOnboarding', { projectId: context.projectId ?? null, threadId: context.threadId ?? null, stepId });
   }
   const done = [!!journey?.workplace, !!journey?.account, !!journey?.space, !!journey?.firstWork];
@@ -83,7 +90,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   const setup: SetupStep[] = [
     { id: 'workplace', title: 'Подготовить партнёра', detail: 'Проверим рабочее место и доступ партнёра.', state: 'upcoming' },
     { id: 'account', title: 'Войти в svaib', detail: 'Подключим твой аккаунт.', state: 'upcoming' },
-    { id: 'space', title: 'Подключить компанию и пространство', detail: 'Выберем компанию и подготовим место для её материалов.', state: 'upcoming' },
+    { id: 'space', title: 'Подключить компанию и пространство', detail: 'В новом разговоре BB выберем постоянную папку для материалов компании.', state: 'upcoming' },
     { id: 'first-work', title: 'Познакомиться и начать работу', detail: 'Расскажешь партнёру о себе и перейдёшь к первой задаче.', state: 'upcoming' },
   ].map((step, index) => ({ ...step, state: done[index] ? 'done' : index === activeStep ? 'current' : 'upcoming' }));
   return <div className="svaib-account-viewport"><main className="svaib-account">

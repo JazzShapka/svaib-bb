@@ -14,7 +14,7 @@ import { opaqueProof } from './workplace-proof';
 import { NATIVE_TOOL, nativeStartSchema } from './native-login';
 import { createHookConsent } from './hook-consent';
 import { HOOK_TOOL } from './hook-bundle';
-import { createFolderSelection, revalidateSelectedFolder, validatePersistentFolder, FOLDER_TOOL } from './folder-selection';
+import { FOLDER_TOOL } from './folder-contract';
 import { createCompanyFolderFlow } from './company-folder-flow';
 
 export const rpcContract = defineRpcContract({
@@ -25,16 +25,6 @@ export const rpcContract = defineRpcContract({
   continueOnboarding: { input: onboardingActionSchema, output: onboardingActionResultSchema },
   connectionStatus: { input: z.null(), output: flowSchema },
   partnerIdentity: { input: z.null(), output: z.object({ subject: z.string().nullable(), threadId: z.string().nullable() }).strict() },
-  folderPickerStatus: { input: z.object({ threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(), output: z.object({ available: z.boolean(), recoverable: z.boolean().optional() }).strict() },
-  chooseCompanyFolder: { input: z.object({ threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(), output: z.discriminatedUnion('status', [
-    z.object({ status: z.literal('cancelled') }).strict(),
-    z.object({ status: z.literal('opened'), threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(),
-    z.object({ status: z.literal('open-failed'), threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(),
-  ]) },
-  resumeCompanyFolder: { input: z.object({ threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(), output: z.discriminatedUnion('status', [
-    z.object({ status: z.literal('opened'), threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(),
-    z.object({ status: z.literal('open-failed'), threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(),
-  ]) },
   cancelLogin: { input: z.null(), output: z.null() },
   logout: { input: z.null(), output: z.object({ revoked: z.boolean() }).strict() },
   setWorkspaceCard: {
@@ -76,46 +66,15 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   });
   await flow.load();
   const connection = flow;
-  const assertFolderCaller = async (ctx: import('@get-bb/plugin-sdk').PluginAgentToolContext) => {
-    const identity = await connection.partnerIdentity();
-    if (!identity.subject || identity.threadId !== ctx.threadId) throw new Error('Сначала проверь подключение в этом разговоре.');
-  };
-  const chooseFolder = createFolderSelection(bb, assertFolderCaller);
-  const folderRecoveries = new Map<string, { threadId: string; sourceProjectId: string; runId: string; epoch: number;
-    binding: NonNullable<import('./connect-flow').ConnectFlowView['binding']>; selection: import('./folder-selection').SelectedFolder;
-    identity: Awaited<ReturnType<typeof account.workplaceIdentity>> }>();
-  const companyFolder = createCompanyFolderFlow({ sdk: bb.sdk, pluginId: bb.pluginId, epoch: () => oauth.epoch, connection,
-    choose: chooseFolder, revalidate: (ctx, selection, fence) => revalidateSelectedFolder(bb, ctx, selection, fence),
-    connectSelectedFolder: (ctx, input, fence) => connection.connectSelectedFolder({ projectId: input.projectId, hostId: input.hostId,
-      path: input.path, providerId: input.providerId, sourceThreadId: ctx.threadId, stepId: 'space' }, fence),
-    rememberOpenFailure: async ({ sourceThreadId, sourceProjectId, threadId, runId, binding, subject, epoch, selection, identity: expectedIdentity }) => {
-      const identity = await account.workplaceIdentity();
-      const current = await connection.view();
-      if (identity.account_id !== subject || identity.account_id !== expectedIdentity.account_id || identity.client_id !== expectedIdentity.client_id ||
-          identity.epoch !== expectedIdentity.epoch || identity.epoch !== epoch || oauth.epoch !== epoch || current.runId !== runId ||
-          current.threadId !== threadId || JSON.stringify(current.binding) !== JSON.stringify(binding))
-        throw new Error('Подключение изменилось. Найди продолжение в списке разговоров и проверь его состояние.');
-      folderRecoveries.set(sourceThreadId, { threadId, sourceProjectId, runId, epoch, binding, selection, identity });
-      bb.realtime.publish('account-changed', null);
-    },
-  });
-  const folderRequests = new Map<string, Set<AbortController>>();
-  const abortFolderRequests = (threadId: string) => { for (const controller of folderRequests.get(threadId) ?? []) controller.abort(); };
-  bb.events.on('thread.deleted', ({ thread }) => {
-    abortFolderRequests(thread.id); folderRecoveries.delete(thread.id);
-    for (const [source, recovery] of folderRecoveries) if (recovery.threadId === thread.id) folderRecoveries.delete(source);
-  });
-  bb.events.on('thread.archived', ({ thread }) => abortFolderRequests(thread.id));
-  bb.events.on('thread.active', ({ thread }) => abortFolderRequests(thread.id));
-  bb.onDispose(() => { for (const controllers of folderRequests.values()) for (const controller of controllers) controller.abort(); folderRecoveries.clear(); });
+  const companyFolder = createCompanyFolderFlow({ sdk: bb.sdk, pluginId: bb.pluginId,
+    serverDataDir: bb.server.experimental_dataDir, connection });
   bb.agents.registerTool({ name: FOLDER_TOOL,
-    description: 'Когда человек решил выбрать папку для материалов организации, открой понятный выбор папки прямо в этом разговоре. Отмена ничего не создаёт. После выбора открой проверку в новой сессии; не выбирай папку сам и не записывай файлы.',
+    description: 'После того как человек выбрал постоянную папку в штатном новом разговоре BB и отправил подготовленное продолжение, проверь фактическую среду этого разговора и открой сохранённое продолжение настройки. Путь не принимается и папка не выбирается агентом. Во временной, личной или управляемой среде откажи без создания файлов.',
     parameters: z.object({}).strict(), execute: async (_input, ctx) => {
       const result = await companyFolder(ctx);
       return JSON.stringify({ ...result, message: result.status === 'opened'
-        ? 'Продолжение открыто в новом разговоре. Здесь заверши ответ, не запускай настройку или проверку повторно.'
-        : result.status === 'open-failed' ? 'Продолжение создано, но открыть его не удалось. Попроси человека нажать «Открыть продолжение» в этом разговоре; не создавай новый разговор.'
-          : 'Выбор отменён, ничего не создано. Скажи об этом человеку и предложи выбрать папку позже.' });
+        ? 'Продолжение открыто в проверенном разговоре. Заверши ответ здесь; не запускай настройку, проверку или создание файлов повторно.'
+        : `Продолжение уже создано: @thread:${result.threadId}, но BB не подтвердил его открытие. Дай ссылку человеку. Для повторного открытия вызови этот же инструмент ещё раз; новый разговор не создавай.` });
     },
   });
   bb.agents.registerTool({ name: HOOK_TOOL, description: 'Проверяет и автоматически подключает все хуки установленного svaib@svaib в текущем Codex; другие плагины не изменяются.',
@@ -172,82 +131,6 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     status: input => account.view(input?.company_id),
     connectionStatus: () => connection.view(),
     partnerIdentity: () => connection.partnerIdentity(),
-    folderPickerStatus: async ({ threadId }) => {
-      const view = await connection.view();
-      const recovery = folderRecoveries.get(threadId);
-      const recoverable = !!recovery && recovery.epoch === oauth.epoch && view.runId === recovery.runId && view.threadId === recovery.threadId;
-      if (folderRequests.has(threadId) || recoverable) return { available: true, recoverable };
-      if (view.stage !== 'ready' || view.threadId !== threadId || !view.binding) return { available: false };
-      const [thread, environment] = await Promise.all([bb.sdk.threads.get({ threadId }), bb.sdk.environments.get({ environmentId: view.binding.environmentId })]);
-      if (thread.deletedAt || thread.archivedAt || thread.status !== 'idle' || thread.environmentId !== view.binding.environmentId ||
-          environment.status !== 'ready' || environment.hostId !== view.binding.hostId) return { available: false };
-      let persistent = false;
-      if (environment.workspaceProvisionType === 'unmanaged' && environment.path) {
-        try {
-          const project = await bb.sdk.projects.get({ projectId: thread.projectId });
-          const root = await validatePersistentFolder(bb.sdk, environment.hostId, environment, environment.path);
-          persistent = project.kind === 'standard' && project.sources.some(source => source.type === 'local_path' &&
-            source.projectId === project.id && source.hostId === environment.hostId && source.path === root);
-        } catch { /* If the current folder cannot be established as durable, offer selection. */ }
-      }
-      return { available: !persistent };
-    },
-    chooseCompanyFolder: async ({ threadId }, rpc) => {
-      const controller = new AbortController();
-      const controllers = folderRequests.get(threadId) ?? new Set<AbortController>();
-      controllers.add(controller); folderRequests.set(threadId, controllers);
-      const signal = AbortSignal.any([rpc.experimental_signal, controller.signal]);
-      try {
-        signal.throwIfAborted();
-        const view = await connection.view(); signal.throwIfAborted();
-        if (view.stage !== 'ready' || view.threadId !== threadId || !view.binding) throw new Error('Открой разговор с подключённым партнёром.');
-        const thread = await bb.sdk.threads.get({ threadId }); signal.throwIfAborted();
-        if (thread.deletedAt || thread.archivedAt || thread.status !== 'idle' || thread.projectId !== view.binding.projectId ||
-            thread.environmentId !== view.binding.environmentId) throw new Error('Дождись ответа партнёра и повтори выбор папки.');
-        return await companyFolder({ threadId, projectId: view.binding.projectId, signal });
-      }
-      finally { controllers.delete(controller); if (!controllers.size) folderRequests.delete(threadId); }
-    },
-    resumeCompanyFolder: async ({ threadId }, rpc) => {
-      const recovery = folderRecoveries.get(threadId);
-      if (!recovery) throw new Error('Продолжение недоступно. Найди его в списке разговоров.');
-      const signal = rpc.experimental_signal;
-      const check = async () => {
-        signal.throwIfAborted();
-        const view = await connection.view();
-        const identity = await account.workplaceIdentity(signal);
-        if (folderRecoveries.get(threadId) !== recovery || oauth.epoch !== recovery.epoch || identity.epoch !== recovery.epoch ||
-            identity.account_id !== recovery.identity.account_id || identity.client_id !== recovery.identity.client_id ||
-            view.runId !== recovery.runId || view.threadId !== recovery.threadId ||
-            JSON.stringify(view.binding) !== JSON.stringify(recovery.binding) || !['verify', 'ready', 'error'].includes(view.stage))
-          throw new Error('Подключение изменилось. Найди продолжение в списке разговоров.');
-        const target = await bb.sdk.threads.get({ threadId: recovery.threadId });
-        const source = await bb.sdk.threads.get({ threadId });
-        const metadata = connectionMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId: recovery.threadId }));
-        const env = await bb.sdk.environments.get({ environmentId: recovery.binding.environmentId });
-        const project = await bb.sdk.projects.get({ projectId: recovery.binding.projectId });
-        if (!source || source.id !== threadId || source.deletedAt || source.archivedAt || source.originPluginId !== bb.pluginId || source.originKind !== null ||
-            source.projectId !== recovery.sourceProjectId || source.environmentId !== recovery.selection.sourceEnvironmentId || source.providerId !== recovery.selection.sourceProviderId ||
-            !target || target.deletedAt || target.archivedAt || target.id !== recovery.threadId || target.originPluginId !== bb.pluginId || target.originKind !== null ||
-            target.projectId !== recovery.binding.projectId || target.environmentId !== recovery.binding.environmentId || target.providerId !== recovery.binding.providerId ||
-            !metadata.success || metadata.data.runId !== recovery.runId || !metadata.data.verifyExistingOnly ||
-            metadata.data.continuation?.sourceThreadId !== threadId || !['verify', 'work'].includes(metadata.data.phase) ||
-            env.id !== recovery.binding.environmentId || env.projectId !== recovery.binding.projectId || env.hostId !== recovery.binding.hostId ||
-            env.status !== 'ready' || env.workspaceProvisionType !== 'unmanaged' || env.path !== recovery.selection.path ||
-            project.id !== recovery.binding.projectId || project.kind !== 'standard' || !project.sources.some(source => source.type === 'local_path' &&
-              source.projectId === project.id && source.hostId === recovery.binding.hostId && source.path === recovery.selection.path) || oauth.epoch !== recovery.epoch)
-          throw new Error('Рабочее место изменилось. Найди продолжение в списке разговоров.');
-        signal.throwIfAborted();
-      };
-      const ctx = { threadId, projectId: recovery.sourceProjectId, signal } as import('@get-bb/plugin-sdk').PluginAgentToolContext;
-      await revalidateSelectedFolder(bb, ctx, recovery.selection, check);
-      await check();
-      try { await bb.sdk.threads.open({ threadId: recovery.threadId, file: null }); }
-      catch { return { status: 'open-failed' as const, threadId: recovery.threadId }; }
-      folderRecoveries.delete(threadId);
-      bb.realtime.publish('account-changed', null);
-      return { status: 'opened' as const, threadId: recovery.threadId };
-    },
     connect: async input => {
       const result = await connection.start(input);
       if (result.threadId) await bb.sdk.threads.open({ threadId: result.threadId, file: null });

@@ -14,9 +14,7 @@ import type { Place, ActionContext } from "./WorkplaceViews";
 import LinkHubPage from "./LinkHubPage";
 import ClientHubPage from "./ClientHubPage";
 import { presentationMarkdown, registeredSourceForHref } from "./document-presentation";
-import { ChooseCompanyFolder } from './experiments/account-prototype/ChooseCompanyFolder';
-import { FOLDER_INTERACTION } from './experiments/account-prototype/folder-contract';
-import { FolderLauncher, useFolderLauncher } from './experiments/account-prototype/FolderLauncher';
+import { FolderComposerBanner } from './experiments/account-prototype/FolderLauncher';
 import "./document-presentation.css";
 import { PersonalOverview, PersonalSectionPage, PersonalActionsPage, PersonalDocumentsPage } from "./PersonalViews";
 import type { PersonalLibraryState } from "./PersonalViews";
@@ -238,7 +236,7 @@ function FixedContextPanel(props: PluginNavPanelProps) {
  return <ContextPanel {...props} selected={selected || undefined} clear={selected?.clear}/>;
 }
 export default definePluginApp(app => {
-  app.slots.pendingInteraction({ id: FOLDER_INTERACTION, component: ChooseCompanyFolder });
+  app.composer.customize({ id: 'svaib-company-folder', scopes: ['new-thread'], banners: [{ id: 'svaib-company-folder-guidance', chrome: 'card', component: FolderComposerBanner }] });
   app.experimental_icons.register({ name: "svaib-workplace/brand", component: ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true"><text x="2" y="20" fontFamily="Montserrat, Inter, sans-serif" fontSize="25" fontWeight="800" fill="var(--svb-teal, #00B4A6)">s</text><circle cx="21" cy="19.5" r="2" fill="#FF4D8D"/></svg> });
   app.experimental_icons.register({ name: "svaib-workplace/compass", component: ({className}) => <Glyph name="Compass" className={className} /> });
   app.slots.navPanel({ id: "workplace", path: "workplace", title: "svaib", icon: "svaib-workplace/brand", component: WorkplaceRouter });
@@ -247,5 +245,4 @@ export default definePluginApp(app => {
   app.slots.experimental_tab({ context: { kind: "thread" }, availability: "action", id: "svaib-context", title: "Контекст svaib", icon: "svaib-workplace/compass", component: () => <ContextPanel />, layout: "flush" });
   app.slots.experimental_tab({ context: { kind: 'thread' }, availability: 'action', id: 'svaib-screen', title: 'Screen', icon: 'PanelsTopLeft', component: ({ threadId }) => <ScreenPanel threadId={threadId} />, layout: 'flush' });
   app.slots.experimental_threadContextSegment({ id: 'svaib-screen-launcher', title: 'Конструктор', group: 'svaib', summary: ScreenLauncher, useVisible: useScreenLauncher });
-  app.slots.experimental_threadContextSegment({ id: 'svaib-folder-launcher', title: 'Папка компании', group: 'svaib', summary: FolderLauncher, useVisible: useFolderLauncher });
 });

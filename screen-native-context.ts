@@ -117,7 +117,7 @@ export function createScreenPluginContext(options: ContextOptions) {
     ]);
     if (environment.id !== thread.environmentId || environment.status !== 'ready')
       throw new ScreenContextError('workspace_unavailable', 'Рабочая среда BB ещё не готова. Повтори после её запуска.');
-    const chooseFolder = () => new ScreenContextError('workspace_selection_required', 'Для материалов организации нужна постоянная папка. В разговоре с партнёром нажми «Выбрать папку» рядом с полем ввода. Если кнопки нет, открой постоянную папку как проект BB. Файлы пока не меняются.');
+    const chooseFolder = () => new ScreenContextError('workspace_selection_required', 'Для материалов организации нужна постоянная папка. Открой новый разговор BB и выбери Project → New project или существующий проект, затем отправь подготовленное продолжение svaib. Файлы пока не меняются.');
     if (environment.workspaceProvisionType !== 'unmanaged' || project.kind !== 'standard' || project.id !== thread.projectId ||
         environment.projectId !== thread.projectId || !environment.path) throw chooseFolder();
     if (!system.primaryHostId || environment.hostId !== system.primaryHostId)
