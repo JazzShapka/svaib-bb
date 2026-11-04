@@ -24,6 +24,8 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   const [view, setView] = useState<AccountView | null>(null);
   const [accountView, setAccountView] = useState<AccountView>(signedOut);
   const [connection, setConnection] = useState<ConnectFlowView | null>(null);
+  const [comparison, setComparison] = useState<'unknown' | 'match' | 'mismatch'>('unknown');
+  const [nativeHost, setNativeHost] = useState<string | null>(null);
   const [journey, setJourney] = useState<JourneyStatus | null>(null);
   const [journeyKey, setJourneyKey] = useState('');
   const [error, setError] = useState('');
@@ -35,12 +37,15 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     const request = ++sequence.current;
     try {
       const progressRequest = journeyRpc.call('journeyStatus', { projectId: context.projectId ?? null, threadId: context.threadId ?? null }).catch(() => null);
-      const [account, flow] = await Promise.all([rpc.call('status', null), rpc.call('connectionStatus').catch(() => null)]);
+      const [account, flow, native] = await Promise.all([rpc.call('status', null), rpc.call('connectionStatus').catch(() => null),
+        rpc.call('compareNativeAccount').catch(() => ({ status: 'unknown' as const, observedAt: null, hostId: null }))]);
       const selected = companyId ? await rpc.call('status', { company_id: companyId }) : account;
       if (request !== sequence.current) return;
       const nextJourneyKey = journeyIdentity(account, context);
       if (nextJourneyKey !== journeyKey) { setJourney(null); setJourneyKey(nextJourneyKey); }
       setAccountView(account);
+      setComparison(native.status);
+      setNativeHost(native.hostId);
       setCompanies(account.me?.companies ?? []);
       void progressRequest.then(progress => {
         if (request !== sequence.current) return;
@@ -71,10 +76,10 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   }, [refresh]);
   // Poll only during the interactive login; this is not an agent or a business-data sync.
   useEffect(() => {
-    if (view?.state !== 'waiting' && !['setup', 'verify', 'cabinet'].includes(connection?.stage ?? '')) return;
+    if (view?.state !== 'waiting' && (nativeHost || !['setup', 'verify', 'cabinet'].includes(connection?.stage ?? ''))) return;
     const timer = setInterval(() => void refresh(), 3000);
     return () => clearInterval(timer);
-  }, [view?.state, connection?.stage, refresh]);
+  }, [view?.state, connection?.stage, nativeHost, refresh]);
   async function act(action: () => Promise<void>) {
     setBusy(true); setError('');
     try { await action(); }
@@ -84,8 +89,9 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   async function continueJourney(stepId: string) {
     if (!journey || journeyKey !== journeyIdentity(accountView, context)) return;
     if (stepId === 'space') {
-      if (connection?.stage !== 'ready' || !connection.binding) throw new Error('Сначала заверши подключение партнёра.');
-      navigate.toCompose({ hostId: connection.binding.hostId, initialPrompt: COMPANY_FOLDER_PROMPT, focusPrompt: false });
+      const hostId = nativeHost ?? connection?.binding?.hostId;
+      if (!hostId) throw new Error('Сначала открой партнёра в BB.');
+      navigate.toCompose({ hostId, initialPrompt: COMPANY_FOLDER_PROMPT, focusPrompt: false });
       return;
     }
     await rpc.call('continueOnboarding', { projectId: context.projectId ?? null, threadId: context.threadId ?? null, stepId });
@@ -113,6 +119,8 @@ export function AccountPage({ production = false }: { production?: boolean } = {
         <button className="svaib-account-button" disabled={busy} onClick={() => void act(async () => { await rpc.call('cancelLogin'); await refresh(); })}>Отменить вход</button>
       </section>}
       {view.me && <section><p className="svaib-account-eyebrow">Аккаунт svaib</p><h2>{view.me.display_name || view.me.subject_id}</h2>
+        {comparison === 'match' && <p role="status">Последний вход партнёра и кабинет: один аккаунт.</p>}
+        {comparison === 'mismatch' && <p role="alert">В кабинете и у партнёра разные аккаунты. Чтобы сверить их, войди в нужный аккаунт.</p>}
         {companies.length > 0 && <label className="svaib-account-company">Компания для просмотра<select value={companyId} disabled={busy} onChange={event => setCompanyId(event.currentTarget.value)}>
           <option value="">Аккаунт без выбранной компании</option>
           {companies.map(company => <option key={company.company_id} value={company.company_id}>{company.company_name || company.tenant_name || company.company_id}</option>)}

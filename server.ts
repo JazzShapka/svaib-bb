@@ -177,7 +177,8 @@ async function initializePlugin(bb: BbPluginApi, validatePersistentRootForTestin
     write: async value => { await settings.experimental_set({ productionOAuthSession: value || null }); },
   } });
   bb.rpc.register(journeyContract, {
-    journeyStatus: input => journeyStatus({ sdk: bb.sdk, account: account.account, flow: account.connection }, input),
+    journeyStatus: input => journeyStatus({ sdk: bb.sdk, account: account.account, flow: account.connection,
+      observation: account.nativeObservation }, input),
   });
   const screen = registerScreenModule(bb, { account, validatePersistentRootForTesting });
   // No agent, source-content read, external write or schedule at plugin load.
@@ -219,7 +220,7 @@ async function initializePlugin(bb: BbPluginApi, validatePersistentRootForTestin
     const configuredSetup = setup && (base.tools?.length ?? 0) > 0;
     const visual = supported && (!setup || finishedSetup || configuredSetup) ? screen.configure(context) : { tools: [], skills: [] };
     const instructions = configuredSetup && base.instructions && visual.instructions
-      ? `${base.instructions}\n\nТолько после connected:true, если согласованный сценарий включает подготовку пространства, продолжи его по правилам пользователя. ${visual.instructions}`
+      ? `${base.instructions}\n\nПосле успешного whoami, если согласованный сценарий включает подготовку пространства, продолжи его по правилам пользователя. ${visual.instructions}`
       : base.instructions;
     return {
       tools: [...new Set([...(base.tools ?? []), ...(visual.tools ?? [])])],

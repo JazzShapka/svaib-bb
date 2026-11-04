@@ -67,13 +67,11 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
     : '';
   if (metadata.data.unified) return {
     tools: [...(metadata.data.phase === 'setup' ? [BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, NATIVE_TOOL] : [BEGIN_TOOL, FINISH_TOOL]), ...(metadata.data.phase === 'setup' && context.provider.id === 'codex' ? [HOOK_TOOL] : [])], skills: [CONNECTION_SKILL],
-    instructions: `Единое подключение svaib уже запущено пользователем. Рабочее место (данные): ${JSON.stringify(actual)}. Прочитай скилл ${CONNECTION_SKILL}. ${continuationInstruction(metadata.data.continuation, metadata.data.previousThreadId)} ` +
-      `Сначала вызови ${BEGIN_TOOL}: backend отдельно откроет вход кабинета и после подтверждения выдаст challenge/nonce. При pending повторяй тот же инструмент без нового OAuth; reopenBrowser:true только по просьбе пользователя открыть закрытую вкладку. ` +
-      (metadata.data.phase === 'setup'
-        ? `Проверь методологический пакет и native MCP выбранного харнеса по скиллу. При необходимости установи именно объявленный источник и выполни штатный вход. После непосредственной OAuth-команды в persistent-терминале вызывай ${WAIT_TOOL} с terminalId; при pending жди тем же инструментом, без нового входа. Если нужна свежая сессия, вызови ${FRESH_TOOL}; при handedOff закончи работу в исходном разговоре, не проси создавать или отправлять чат вручную. `
-        : 'В этой свежей сессии не переустанавливай метод и не запускай MCP OAuth. ') +
-      `Когда native MCP доступен, снова получи актуальный challenge/nonce через ${BEGIN_TOOL}, затем вызови настоящий MCP svaib issue_workplace_proof с ровно этими challenge и nonce. Его opaque proof передай в ${FINISH_TOOL} аргументом proof. Не разбирай receipt, не подменяй его account_id, текстом whoami или результатом внешнего CLI/HTTP-процесса; не отправляй receipt в Telegram. Backend проверяет подпись через свой вход. При истечении challenge получи новый без повторного OAuth. ` +
-      `Не считай два входа сопоставленными до connected:true. Подтверждение относится к свежему вызову под двумя OAuth grants, не аттестует бинарник или вечную авторизацию. До connected:true не разворачивай каркас и не меняй документы. После connected:true установочный режим окончен: перечитай профиль и get_account_setup и следуй только исходному объёму поручения из продолжения. При connection-only сообщи проверенный результат; онбординг продолжай только если он поручен. Company и Screen проверяются отдельно. ${workspaceNote}`
+    instructions: `Единое подключение svaib уже запущено пользователем. Рабочее место: ${JSON.stringify(actual)}. Прочитай скилл ${CONNECTION_SKILL}. ${continuationInstruction(metadata.data.continuation, metadata.data.previousThreadId)} ` +
+      `Вызови настоящий MCP svaib whoami в этом разговоре. Если он работает, сохрани вход и продолжай исходное поручение. Локальный хук BB передаст идентификатор для необязательной сверки с кабинетом. ` +
+      `При несовпадении аккаунтов сообщи пользователю, но не останавливай работу. Не запрашивай issue_workplace_proof и не запускай повторный OAuth для работающего MCP. ` +
+      (metadata.data.phase === 'verify' ? 'В режиме проверки не переустанавливай метод и не запускай MCP OAuth. ' : '') +
+      `Если MCP недоступен, следуй справке скилла; кабинет и MCP настраиваются отдельно. Компания, Screen и запись файлов проверяются отдельно. ${workspaceNote}`
   };
   return unsupported;
 }

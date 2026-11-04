@@ -1,8 +1,10 @@
 import type { PluginAgentToolContext, PluginBbSdk } from '@get-bb/plugin-sdk';
 import { CommittedOpenError, type ConnectFlowView, type SelectedFolderInput, type SelectionFence } from './connect-flow';
 import { persistentFolderExclusions, validateFolderPath, type FolderEnvironment } from './folder-selection';
+import { connectionMetadataSchema } from './connection';
+import { checkContinuation, continuationPrompt, type Continuation } from './continuation';
 
-export type CompanyFolderResult = { status: 'opened' | 'open-failed'; threadId: string };
+export type CompanyFolderResult = { status: 'opened' | 'open-failed' | 'ready'; threadId: string; continuation?: Continuation; instruction?: string };
 type Project = Awaited<ReturnType<PluginBbSdk['projects']['get']>>;
 type Thread = Awaited<ReturnType<PluginBbSdk['threads']['get']>>;
 type Environment = Awaited<ReturnType<PluginBbSdk['environments']['get']>>;
@@ -16,6 +18,7 @@ export type CompanyFolderDependencies = {
     view(): Promise<ConnectFlowView>;
     connectSelectedFolder(input: SelectedFolderInput, fence: SelectionFence): Promise<{ threadId: string; environmentId: string; stage: 'verify' }>;
   };
+  hasNativeObservation?(): Promise<boolean>;
   /** Test seam; production also excludes BB-owned, managed and temporary trees. */
   validatePath?(hostId: string, env: FolderEnvironment, path: string): Promise<string>;
 };
@@ -80,6 +83,19 @@ export function createCompanyFolderFlow(d: CompanyFolderDependencies) {
     return { status: 'opened', threadId };
   };
 
+  const continueHere = async (view: ConnectFlowView, threadId: string): Promise<CompanyFolderResult> => {
+    if (!view.threadId || !view.binding) return { status: 'ready', threadId };
+    const source = await d.sdk.threads.get({ threadId: view.threadId });
+    if (!source || source.deletedAt || source.originPluginId !== d.pluginId || source.originKind !== null ||
+        source.projectId !== view.binding.projectId || source.environmentId !== view.binding.environmentId ||
+        source.providerId !== view.binding.providerId) throw new Error('Исходный разговор подключения изменился.');
+    const metadata = connectionMetadataSchema.parse(await d.sdk.threads.getPluginMetadata({ threadId: source.id }));
+    if (metadata.runId !== view.runId) throw new Error('Исходное поручение подключения изменилось.');
+    const continuation = metadata.continuation
+      ? checkContinuation(metadata.continuation, view.binding.projectId, view.binding.environmentId) : undefined;
+    return { status: 'ready', threadId, ...(continuation ? { continuation, instruction: continuationPrompt(continuation, source.id) } : {}) };
+  };
+
   return async (ctx: PluginAgentToolContext): Promise<CompanyFolderResult> => {
     ctx.signal.throwIfAborted();
     if (pending) {
@@ -89,9 +105,14 @@ export function createCompanyFolderFlow(d: CompanyFolderDependencies) {
     const operation = (async (): Promise<CompanyFolderResult> => {
       const target = await loadTarget(ctx);
       const initial = await d.connection.view();
+      // Folder selection and account comparison are independent. Continue in
+      // the actual selected thread; no synthetic signed pairing is asserted.
+      if (initial.stage !== 'ready' && (await d.hasNativeObservation?.() || !initial.binding ||
+          initial.binding.projectId !== target.project.id || initial.binding.hostId !== target.environment.hostId ||
+          initial.binding.providerId !== target.providerId)) return continueHere(initial, ctx.threadId);
       const existing = await matchContinuation(initial, target);
       if (existing) return openExisting(existing.thread.id);
-      if (initial.stage !== 'ready') throw new Error('Сначала заверши текущее подключение svaib.');
+      if (initial.stage !== 'ready') return continueHere(initial, ctx.threadId);
       const fence: SelectionFence = async () => { await loadTarget(ctx); };
       let handoff: { threadId: string; environmentId: string; stage: 'verify' };
       try {

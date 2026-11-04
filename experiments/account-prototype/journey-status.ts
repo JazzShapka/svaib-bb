@@ -24,6 +24,7 @@ type Dependencies = {
   sdk: Pick<PluginBbSdk, 'threads' | 'environments' | 'hosts' | 'system' | 'projects'>;
   account: { view(): Promise<AccountView>; onboarding(): Promise<OnboardingView>; companyOnboarding(id: string): Promise<OnboardingView> };
   flow: { view(): Promise<ConnectFlowView> };
+  observation?: { read(): Promise<{ threadId: string; accountId: string; environmentId: string; hostId: string; observedAt: number } | null> };
   readCatalog?: (provider: string, cwd: string, sdk: Dependencies['sdk'], hostId: string) => Promise<unknown>;
   /** Test-only: production uses the shared persistent-folder validator. */
   validatePersistentRootForTesting?: (path: string, hostId: string,
@@ -120,14 +121,29 @@ async function readSmallFile(path: string, max: number): Promise<string> {
 /** Project existing proofs to the page without creating or modifying progress. */
 export async function journeyStatus(d: Dependencies, context: { projectId: string | null; threadId: string | null }): Promise<JourneyStatus> {
   const fallback: JourneyStatus = { workplace: false, account: false, space: false, firstWork: false, nextStep: null, nextStages: [], stagesAvailable: false };
+  // A real whoami observation is sufficient for the onboarding UI; it is
+  // advisory and does not give Screen or company operations any authority.
+  const readFlow = async (): Promise<ConnectFlowView> => {
+    const observed = await d.observation?.read();
+    if (observed) {
+      const thread = await d.sdk.threads.get({ threadId: observed.threadId });
+      if (!thread.deletedAt && thread.environmentId === observed.environmentId &&
+          ['codex', 'claude-code'].includes(thread.providerId)) {
+        return { stage: 'ready', runId: `observation:${observed.observedAt}`, threadId: thread.id,
+          binding: { projectId: thread.projectId, environmentId: observed.environmentId,
+            hostId: observed.hostId, providerId: thread.providerId as 'codex' | 'claude-code' },
+          subject: observed.accountId, message: '', retryable: false };
+      }
+    }
+    return d.flow.view();
+  };
   let flow: ConnectFlowView;
   let view: AccountView;
-  try { [flow, view] = await Promise.all([d.flow.view(), d.account.view()]); }
+  try { [flow, view] = await Promise.all([readFlow(), d.account.view()]); }
   catch { return fallback; }
   const account = view.state === 'connected' && !!view.me;
   const out: JourneyStatus = { ...fallback, account };
-  if (!account) return out;
-  try {
+  if (account) try {
     const info = await d.account.onboarding();
     if (info.status === 'available') out.nextStep = info.nextStep;
   } catch { /* an unavailable setup never changes proof of a sign-in */ }
@@ -142,6 +158,7 @@ export async function journeyStatus(d: Dependencies, context: { projectId: strin
     if (environment.status !== 'ready' || environment.hostId !== flow.binding.hostId ||
         environment.hostId !== system.primaryHostId || !environment.path) return out;
     out.workplace = true;
+    if (!account) return out;
     if (!await hasPersistentProject(d, thread.projectId, environment)) return out;
     const binding = await readScreenCompanyBinding(environment.path);
     if (binding.realRoot !== environment.path) return out;
@@ -162,7 +179,7 @@ export async function journeyStatus(d: Dependencies, context: { projectId: strin
     try { catalog = await (d.readCatalog ?? nativeCatalog)(thread.providerId, environment.path, d.sdk, environment.hostId); }
     catch { /* The workspace can be ready even if its native stage catalog is unavailable. */ }
     const [currentFlow, currentThread, currentBinding, currentCompany, currentEnvironment] = await Promise.all([
-      d.flow.view(), d.sdk.threads.get({ threadId }), readScreenCompanyBinding(environment.path),
+      readFlow(), d.sdk.threads.get({ threadId }), readScreenCompanyBinding(environment.path),
       d.account.companyOnboarding(binding.companyId), d.sdk.environments.get({ environmentId: thread.environmentId }),
     ]);
     if (currentFlow.stage !== 'ready' || currentFlow.runId !== flow.runId || currentFlow.subject !== flow.subject ||
@@ -174,7 +191,7 @@ export async function journeyStatus(d: Dependencies, context: { projectId: strin
         currentEnvironment.id !== environment.id || currentEnvironment.status !== 'ready' || currentEnvironment.path !== environment.path ||
         currentEnvironment.hostId !== environment.hostId || !await hasPersistentProject(d, thread.projectId, currentEnvironment)) return out;
     const [lastFlow, lastThread, lastCompany] = await Promise.all([
-      d.flow.view(), d.sdk.threads.get({ threadId }), d.account.companyOnboarding(binding.companyId),
+      readFlow(), d.sdk.threads.get({ threadId }), d.account.companyOnboarding(binding.companyId),
     ]);
     if (lastFlow.stage !== 'ready' || lastFlow.runId !== flow.runId || lastFlow.subject !== flow.subject ||
         JSON.stringify(lastFlow.binding) !== JSON.stringify(flow.binding) || lastThread.deletedAt ||

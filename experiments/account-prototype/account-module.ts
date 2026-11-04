@@ -16,8 +16,11 @@ import { createHookConsent } from './hook-consent';
 import { HOOK_TOOL } from './hook-bundle';
 import { FOLDER_TOOL } from './folder-contract';
 import { createCompanyFolderFlow } from './company-folder-flow';
+import { comparisonSchema, createNativeObservation, nativeObservationInputSchema } from './native-observation';
 
 export const rpcContract = defineRpcContract({
+  observeNativeAccount: { input: nativeObservationInputSchema, output: z.object({ recorded: z.literal(true) }).strict() },
+  compareNativeAccount: { input: z.null(), output: comparisonSchema },
   status: { input: z.object({ company_id: z.string().min(1).max(64) }).strict().nullable(), output: accountViewSchema },
   connectionThread: { input: z.object({ threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(), output: connectionThreadSchema },
   beginLogin: { input: z.null(), output: z.object({ authorizationUrl: z.string().url() }).strict() },
@@ -54,6 +57,8 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   const oauth = new OAuthConnection(options.sessionStore, changed, fetcher, endpoints);
   bb.onDispose(() => oauth.dispose());
   const account = new AccountController(oauth, new SvaibApi(fetcher, apiBase), new SvaibMcp(fetcher, endpoints.resource));
+  const nativeObservation = createNativeObservation({ sdk: bb.sdk, kv: bb.storage.kv,
+    account: () => account.view(), changed: () => bb.realtime.publish('account-changed', null) });
   if (endpoints.resource !== 'https://api.svaib.com/mcp' || apiBase !== 'https://api.svaib.com') throw new Error('production_resource_required');
   const browser = bb.hosts.experimental_client({ contract: browserContract });
   const reviewHooks = createHookConsent(bb);
@@ -67,12 +72,15 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   await flow.load();
   const connection = flow;
   const companyFolder = createCompanyFolderFlow({ sdk: bb.sdk, pluginId: bb.pluginId,
-    serverDataDir: bb.server.experimental_dataDir, connection });
+    serverDataDir: bb.server.experimental_dataDir, connection,
+    hasNativeObservation: async () => !!await nativeObservation.read() });
   bb.agents.registerTool({ name: FOLDER_TOOL,
     description: 'После того как человек выбрал постоянную папку в штатном новом разговоре BB и отправил подготовленное продолжение, проверь фактическую среду этого разговора и открой сохранённое продолжение настройки. Путь не принимается и папка не выбирается агентом. Во временной, личной или управляемой среде откажи без создания файлов.',
     parameters: z.object({}).strict(), execute: async (_input, ctx) => {
       const result = await companyFolder(ctx);
-      return JSON.stringify({ ...result, message: result.status === 'opened'
+      return JSON.stringify({ ...result, message: result.status === 'ready'
+        ? 'Постоянная папка проверена. Продолжи работу в этом разговоре в пределах переданного continuation; если его нет, не выдумывай исходное поручение. Проверь выбранную компанию и существующее пространство. Сверка аккаунтов не является условием работы; не создавай файлы без поручения.'
+        : result.status === 'opened'
         ? 'Продолжение открыто в проверенном разговоре. Заверши ответ здесь; не запускай настройку, проверку или создание файлов повторно.'
         : `Продолжение уже создано: @thread:${result.threadId}, но BB не подтвердил его открытие. Дай ссылку человеку. Для повторного открытия вызови этот же инструмент ещё раз; новый разговор не создавай.` });
     },
@@ -81,9 +89,9 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     parameters: z.object({}).strict(),
     execute: async (_, ctx) => JSON.stringify(await reviewHooks(ctx)) });
   bb.onDispose(() => connection.dispose());
-    bb.agents.registerTool({ name: BEGIN_TOOL, description: 'Начинает или проверяет вход кабинета svaib без заявления native готовности. После подтверждения возвращает серверный challenge для native MCP issue_workplace_proof. Токены и OAuth-ссылки не возвращает.',
+    bb.agents.registerTool({ name: BEGIN_TOOL, description: 'Начинает или проверяет вход кабинета svaib. Не проверяет вход партнёра и не возвращает токены или OAuth-ссылки.',
       parameters: z.object({ continuation: continuationInputSchema.optional(), reopenBrowser: z.boolean().optional().describe('Только по просьбе пользователя повторно открыть закрытую вкладку.') }).strict(),
-      execute: async ({ reopenBrowser, continuation }, ctx) => JSON.stringify(await connection.preparePairing(ctx, reopenBrowser, continuation)) });
+      execute: async ({ reopenBrowser, continuation }, ctx) => JSON.stringify(await connection.prepareCabinet(ctx, reopenBrowser, continuation)) });
     bb.agents.registerTool({ name: FINISH_TOOL, description: 'Проверяет opaque proof от настоящего native MCP issue_workplace_proof через отдельный вход backend. Завершает сопоставление двух account grants в текущем подключении. Не принимает account_id или токены.',
       parameters: z.object({ proof: opaqueProof }).strict(),
       execute: async ({ proof }, ctx) => JSON.stringify(await connection.complete(proof, ctx)) });
@@ -118,6 +126,8 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   const configure = (context: PluginAgentConfigurationContext) => connectionConfiguration(context, bb.pluginId);
   if (options.registerConfigure !== false) bb.agents.configure(configure);
   bb.rpc.register(rpcContract, {
+    observeNativeAccount: input => nativeObservation.record(input),
+    compareNativeAccount: () => nativeObservation.compare(),
     connectionThread: async ({ threadId }) => {
       const thread = await bb.sdk.threads.get({ threadId });
       const metadata = await bb.sdk.threads.getPluginMetadata({ threadId });
@@ -137,6 +147,19 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
       return result;
     },
     continueOnboarding: async input => {
+      const observed = await nativeObservation.read();
+      if (observed && !['workplace', 'account'].includes(input.stepId)) {
+        const threadId = input.threadId ?? observed.threadId;
+        const thread = await bb.sdk.threads.get({ threadId });
+        if (thread.deletedAt || thread.environmentId !== observed.environmentId ||
+            (input.projectId && thread.projectId !== input.projectId) ||
+            !['codex', 'claude-code'].includes(thread.providerId))
+          throw new Error('Открой разговор в проверенном рабочем месте и повтори.');
+        await bb.sdk.threads.send({ threadId, mode: 'queue-if-active', input: [{ type: 'text', mentions: [],
+          text: `Пользователь попросил продолжить путь svaib. Выбранный этап: ${JSON.stringify(input.stepId)}. Продолжи по скиллу onboarding, не расширяя поручение.` }] });
+        await bb.sdk.threads.open({ threadId, file: null });
+        return { threadId };
+      }
       const result = await connection.continueOnboarding(input);
       await bb.sdk.threads.open({ threadId: result.threadId, file: null });
       return result;
@@ -153,7 +176,7 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     },
   });
   return {
-    account, connection, configure,
+    account, connection, nativeObservation, configure,
     epoch: () => oauth.epoch,
     verifiedCompany: account.verifiedCompany.bind(account),
     callMcpForContext: account.callMcpForContext.bind(account),

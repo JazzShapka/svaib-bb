@@ -51,7 +51,7 @@ const onboardingCommunication = 'Общайся с человеком без т�
   'Не утверждай, что конструктор открыт или виден человеку, пока это не подтверждено интерфейсом; если показать его не получилось, прямо скажи об этом и помоги продолжить.';
 const journeyPrompt = (stepId: string) => `Пользователь попросил продолжить путь svaib. Выбранный этап: ${JSON.stringify(stepId)}. ` +
   'Сначала проверь доступность скилла и MCP svaib именно в этой сессии. Если они недоступны, честно скажи об этом и попроси открыть новую сессию после подключения; не утверждай, что проверка среды подтверждает их доступность здесь. ' +
-  'Если подключение ещё выполняется, сначала заверши его проверку. Прочитай скилл svaib:onboarding ' +
+  'Прочитай скилл svaib:onboarding ' +
   'и продолжи с проверенного места, перечитай текущий профиль и get_account_setup. ' +
   (setupSteps.has(stepId)
     ? 'Помоги с выбранным шагом подготовки партнёра, аккаунта или пространства; проверяй только недостающее. ' +
@@ -75,6 +75,7 @@ const selectedBootstrapSchema = z.object({ schema: z.literal(1), task: z.literal
   runId: z.string(), targetHostId: z.string(), successorThreadId: z.string().optional() }).strict();
 type Pairing = z.infer<typeof pairingSchema>;
 type PairingStart = { connected: false; pending: true; step: 'cabinet'; threadId: string; message: string } |
+  { connected: false; step: 'native'; threadId: string; message: string } |
   { connected: false; step: 'proof'; challenge: string; nonce: string; expires_at: number; threadId: string };
 const digest = (proof: string) => createHash('sha256').update(proof).digest('hex');
 type Dependencies = {
@@ -402,8 +403,8 @@ export class ConnectFlow {
           }
         }
         await this.d.sdk.threads.send({ threadId, mode: 'auto', input: instructionInput(
-          (phase === 'verify' ? 'Получай актуальный challenge через svaib_connect_begin, затем native MCP issue_workplace_proof и svaib_connect_finish({proof}). Ничего не устанавливай и не запускай MCP OAuth. ' : 'Продолжи незавершённое подключение svaib в этом разговоре. ') +
-          (openFreshCabinet ? 'Новый вход кабинета уже открыт backend. Проверяй тот же вход штатным begin/finish без reopenBrowser; не начинай новый OAuth. ' : 'Пользователь явно попросил продолжить подключение: при необходимости открой незавершённый вход кабинета через reopenBrowser. ') +
+          (phase === 'verify' ? 'Проверь native MCP через whoami. Ничего не устанавливай и не запускай MCP OAuth. ' : 'Продолжи незавершённое подключение svaib в этом разговоре. ') +
+          (openFreshCabinet ? 'Новый вход кабинета уже открыт backend. Проверяй тот же вход через begin без reopenBrowser; не начинай новый OAuth. ' : 'Пользователь явно попросил продолжить подключение: при необходимости открой незавершённый вход кабинета через reopenBrowser. ') +
           'Сохрани работающие входы.') }); check();
         return this.view();
       }
@@ -921,10 +922,10 @@ export class ConnectFlow {
     const thread = await this.d.sdk.threads.spawn({ projectId: binding.projectId,
       environment: { type: 'reuse', environmentId: binding.environmentId }, providerId: binding.providerId,
       ...(defaults ? { model: defaults.model, permissionMode: defaults.permissionMode, reasoningLevel: defaults.reasoningLevel, serviceTier: defaults.serviceTier } : {}),
-      title: 'Партнёр svaib', input: instructionInput(('Продолжи проверку svaib: получи текущий challenge через svaib_connect_begin, вызови native MCP issue_workplace_proof и передай его proof в svaib_connect_finish. Ничего не переустанавливай и не запускай повторный MCP OAuth.') + continuationPrompt(continuation, source.id) +
+      title: 'Партнёр svaib', input: instructionInput(('Продолжи проверку svaib: вызови native MCP whoami. Ничего не переустанавливай и не запускай повторный MCP OAuth.') + continuationPrompt(continuation, source.id) +
         (onboardingStep ? ` После проверки: ${journeyPrompt(onboardingStep)}` :
           continuation?.captured && continuation.data.scope === 'onboarding' ? ` ${onboardingCommunication}` : '') +
-        (options?.bootstrap ? ' Папка выбрана человеком; это не подтверждает компанию или структуру и не разрешает запись. После connected:true ограниченно прочитай последние сообщения указанного исходного разговора через bb thread log, чтобы восстановить договорённости; не копируй полную переписку, не угадывай согласия и не считай выбор папки разрешением на запись.' : '')),
+        (options?.bootstrap ? ' Папка выбрана человеком; это не подтверждает компанию или структуру и не разрешает запись. После whoami ограниченно прочитай последние сообщения указанного исходного разговора через bb thread log, чтобы восстановить договорённости; не копируй полную переписку, не угадывай согласия и не считай выбор папки разрешением на запись.' : '')),
       pluginMetadata: { schema: 1, task: 'svaib-connect', phase: 'verify', binding, unified: true, runId, ...(continuation ? { continuation } : {}),
         ...(options?.verifyExistingOnly ? { verifyExistingOnly: true } : {}), previousThreadId: source.id, targetHostId: binding.hostId },
     });
@@ -1071,7 +1072,15 @@ export class ConnectFlow {
     return this.pairingStarting;
   }
 
-  private async beginPairing(ctx: PluginAgentToolContext, reopenBrowser: boolean, updates?: ContinuationInput): Promise<PairingStart> {
+  /** Set up the cabinet independently; native whoami is observed locally. */
+  prepareCabinet(ctx: PluginAgentToolContext, reopenBrowser = false, updates?: ContinuationInput): Promise<PairingStart> {
+    if (ctx.threadId !== this.state.threadId) return Promise.reject(new Error('Этот разговор не выполняет текущее подключение svaib.'));
+    if (this.pairingStarting) return this.pairingStarting;
+    this.pairingStarting = this.beginPairing(ctx, reopenBrowser, updates, true).finally(() => { this.pairingStarting = null; });
+    return this.pairingStarting;
+  }
+
+  private async beginPairing(ctx: PluginAgentToolContext, reopenBrowser: boolean, updates?: ContinuationInput, cabinetOnly = false): Promise<PairingStart> {
     const { binding } = await this.caller(ctx);
     const runId = this.state.runId;
     let epoch = this.d.epoch();
@@ -1116,6 +1125,12 @@ export class ConnectFlow {
       if (!confirmed) return { connected: false, pending: true, step: 'cabinet', threadId: ctx.threadId,
         message: 'Вход ожидает подтверждения. Повтори svaib_connect_begin без нового OAuth; вкладку открывай повторно только по просьбе пользователя.' };
       account = confirmed;
+    }
+    if (cabinetOnly) {
+      this.pendingCabinet = null;
+      await this.save({ stage: 'verify', retryable: false, message: 'Кабинет подключён. Проверь партнёра в разговоре.' }, valid);
+      return { connected: false, step: 'native', threadId: ctx.threadId,
+        message: 'Кабинет подключён. Вызови whoami партнёра; сверка аккаунтов необязательна для работы.' };
     }
     const identity = await this.d.proofs.identity(signal); check();
     const metadata = connectionMetadataSchema.parse(await this.d.sdk.threads.getPluginMetadata({ threadId: ctx.threadId })); check();
