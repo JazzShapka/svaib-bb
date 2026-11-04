@@ -77,7 +77,7 @@ export class NativeLogin {
   private async create(input: Input, owner: Owner, valid: () => Promise<void>) {
     input = nativeStartSchema.parse(input); await valid();
     if (this.record && (!this.owns(owner) || this.record.retiring)) {
-      if (!await this.retire()) throw new Error('Предыдущая попытка входа ещё завершается. Нажми «Продолжить подключение» чуть позже; второй вход не запущен.');
+      if (!await this.retire()) throw new Error('Предыдущая попытка входа ещё завершается. Продолжи разговор с партнёром чуть позже; второй вход не запущен.');
       await valid();
     }
     const previous = await this.status(owner); await valid();
@@ -112,7 +112,7 @@ export class NativeLogin {
       }
       throw error;
     }
-    return { terminalId: terminal.id, finished: false, message: 'Подтверди вход в браузере. Если вернёшься позже, нажми «Продолжить подключение» — выполненные шаги сохранятся.' };
+    return { terminalId: terminal.id, finished: false, message: 'Подтверди вход в браузере. Если вернёшься позже, продолжи разговор с партнёром — выполненные шаги сохранятся.' };
   }
   private async cancelCreated(terminalId: string) {
     // The owned helper closes its native app-server with EOF and waits for real

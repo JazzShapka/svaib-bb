@@ -2,8 +2,6 @@ import { lstat, realpath } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
-export { FOLDER_TOOL } from './folder-contract';
-
 // True for equality, descendants and ancestors: selecting a parent of BB-owned
 // storage would otherwise make that ephemeral tree part of the company folder.
 function overlaps(a: string, b: string): boolean {

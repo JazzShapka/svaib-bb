@@ -6,6 +6,7 @@ export type SetupStep = {
   title: string;
   detail: string;
   state: 'done' | 'current' | 'upcoming' | 'unknown';
+  doneLabel?: string;
 };
 
 export type NextStep = {
@@ -49,7 +50,7 @@ export function OnboardingJourney({ setup, setupComplete, nextSteps, stagesAvail
     {setup.map((step, index) => <li key={step.id} className={`svaib-journey-step svaib-journey-step--${step.state}`}>
       <span className="svaib-journey-number" aria-hidden="true">{step.state === 'done' ? '✓' : index + 1}</span>
       <div className="svaib-journey-copy">
-        <div className="svaib-journey-step-header"><h3>{step.title}</h3><span className="svaib-journey-status">{setupLabels[step.state]}</span></div>
+        <div className="svaib-journey-step-header"><h3>{step.title}</h3><span className="svaib-journey-status">{step.state === 'done' ? step.doneLabel ?? setupLabels.done : setupLabels[step.state]}</span></div>
         <p>{step.detail}</p>
         {!setupComplete && step.id === currentId && <button type="button" className="svaib-journey-action" disabled={busy} onClick={() => onContinue(step.id)}>Продолжить</button>}
       </div>

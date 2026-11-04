@@ -6,16 +6,13 @@ import { SvaibApi } from './api';
 import { OAuthConnection, productionOAuth, type OAuthEndpoints, type SessionStore } from './oauth';
 import { SvaibMcp } from './mcp';
 import type { Fetcher } from './http';
-import { connectionConfiguration, connectionMetadataSchema, connectionThreadSchema, BEGIN_TOOL, FINISH_TOOL, FRESH_TOOL, WAIT_TOOL, START_TOOL } from './connection';
-import { ConnectFlow, flowSchema, startFlowSchema, onboardingActionSchema, onboardingActionResultSchema } from './connect-flow';
+import { connectionConfiguration, connectionMetadataSchema, connectionThreadSchema, BEGIN_TOOL, FRESH_TOOL, WAIT_TOOL, START_TOOL } from './connection';
+import { ConnectFlow, flowSchema, startFlowSchema } from './connect-flow';
 import { browserContract } from './browser-contract';
 import { continuationInputSchema } from './continuation';
-import { opaqueProof } from './workplace-proof';
 import { NATIVE_TOOL, nativeStartSchema } from './native-login';
 import { createHookConsent } from './hook-consent';
 import { HOOK_TOOL } from './hook-bundle';
-import { FOLDER_TOOL } from './folder-contract';
-import { createCompanyFolderFlow } from './company-folder-flow';
 import { comparisonSchema, createNativeObservation, nativeObservationInputSchema } from './native-observation';
 import { onboardingViewSchema } from './contracts';
 
@@ -30,7 +27,6 @@ export const rpcContract = defineRpcContract({
   beginLogin: { input: z.null(), output: z.object({ authorizationUrl: z.string().url() }).strict() },
   startCabinetLogin: { input: z.null(), output: z.null() },
   connect: { input: startFlowSchema, output: flowSchema },
-  continueOnboarding: { input: onboardingActionSchema, output: onboardingActionResultSchema },
   connectionStatus: { input: z.null(), output: flowSchema },
   partnerIdentity: { input: z.null(), output: z.object({ subject: z.string().nullable(), threadId: z.string().nullable() }).strict() },
   cancelLogin: { input: z.null(), output: z.null() },
@@ -71,25 +67,10 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     account: () => account.view(), begin: () => oauth.begin(), cancel: () => oauth.cancel(), restartPending: epoch => oauth.restartPending(epoch), epoch: () => oauth.epoch, changed,
     open: async (url, hostId, signal) => { await browser.call('openLogin', { url }, { hostId, signal }); },
     prepareHooks: ctx => reviewHooks(ctx),
-    proofs: { identity: account.workplaceIdentity.bind(account), begin: account.beginWorkplaceProof.bind(account),
-      verify: account.verifyWorkplaceProof.bind(account) },
+    identity: account.workplaceIdentity.bind(account),
   });
   await flow.load();
   const connection = flow;
-  const companyFolder = createCompanyFolderFlow({ sdk: bb.sdk, pluginId: bb.pluginId,
-    serverDataDir: bb.server.experimental_dataDir, connection,
-    hasNativeObservation: async () => !!await nativeObservation.read() });
-  bb.agents.registerTool({ name: FOLDER_TOOL,
-    description: 'После того как человек выбрал постоянную папку в штатном новом разговоре BB и отправил подготовленное продолжение, проверь фактическую среду этого разговора и открой сохранённое продолжение настройки. Путь не принимается и папка не выбирается агентом. Во временной, личной или управляемой среде откажи без создания файлов.',
-    parameters: z.object({}).strict(), execute: async (_input, ctx) => {
-      const result = await companyFolder(ctx);
-      return JSON.stringify({ ...result, message: result.status === 'ready'
-        ? 'Постоянная папка проверена. Продолжи работу в этом разговоре в пределах переданного continuation; если его нет, не выдумывай исходное поручение. Проверь выбранную компанию и существующее пространство. Сверка аккаунтов не является условием работы; не создавай файлы без поручения.'
-        : result.status === 'opened'
-        ? 'Продолжение открыто в проверенном разговоре. Заверши ответ здесь; не запускай настройку, проверку или создание файлов повторно.'
-        : `Продолжение уже создано: @thread:${result.threadId}, но BB не подтвердил его открытие. Дай ссылку человеку. Для повторного открытия вызови этот же инструмент ещё раз; новый разговор не создавай.` });
-    },
-  });
   bb.agents.registerTool({ name: HOOK_TOOL, description: 'Проверяет и автоматически подключает все хуки установленного svaib@svaib в текущем Codex; другие плагины не изменяются.',
     parameters: z.object({}).strict(),
     execute: async (_, ctx) => JSON.stringify(await reviewHooks(ctx)) });
@@ -97,9 +78,6 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     bb.agents.registerTool({ name: BEGIN_TOOL, description: 'Начинает или проверяет вход кабинета svaib. Не проверяет вход партнёра и не возвращает токены или OAuth-ссылки.',
       parameters: z.object({ continuation: continuationInputSchema.optional(), reopenBrowser: z.boolean().optional().describe('Только по просьбе пользователя повторно открыть закрытую вкладку.') }).strict(),
       execute: async ({ reopenBrowser, continuation }, ctx) => JSON.stringify(await connection.prepareCabinet(ctx, reopenBrowser, continuation)) });
-    bb.agents.registerTool({ name: FINISH_TOOL, description: 'Проверяет opaque proof от настоящего native MCP issue_workplace_proof через отдельный вход backend. Завершает сопоставление двух account grants в текущем подключении. Не принимает account_id или токены.',
-      parameters: z.object({ proof: opaqueProof }).strict(),
-      execute: async ({ proof }, ctx) => JSON.stringify(await connection.complete(proof, ctx)) });
   bb.agents.registerTool({ name: START_TOOL, description: 'По явному поручению подключить svaib передаёт ограниченное продолжение из текущего BB-разговора и открывает подключение. Сохрани исходный объём поручения; не передавай credentials или полный transcript.',
     parameters: continuationInputSchema, execute: async (continuation, ctx) => {
       const result = await connection.start({ projectId: ctx.projectId, threadId: ctx.threadId, continuation });
@@ -165,24 +143,6 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     connect: async input => {
       const result = await connection.start(input);
       if (result.threadId) await bb.sdk.threads.open({ threadId: result.threadId, file: null });
-      return result;
-    },
-    continueOnboarding: async input => {
-      const observed = await nativeObservation.read();
-      if (observed && !['workplace', 'account'].includes(input.stepId)) {
-        const threadId = input.threadId ?? observed.threadId;
-        const thread = await bb.sdk.threads.get({ threadId });
-        if (thread.deletedAt || thread.environmentId !== observed.environmentId ||
-            (input.projectId && thread.projectId !== input.projectId) ||
-            !['codex', 'claude-code'].includes(thread.providerId))
-          throw new Error('Открой разговор в проверенном рабочем месте и повтори.');
-        await bb.sdk.threads.send({ threadId, mode: 'queue-if-active', input: [{ type: 'text', mentions: [],
-          text: `Пользователь попросил продолжить путь svaib. Выбранный этап: ${JSON.stringify(input.stepId)}. Продолжи по скиллу onboarding, не расширяя поручение.` }] });
-        await bb.sdk.threads.open({ threadId, file: null });
-        return { threadId };
-      }
-      const result = await connection.continueOnboarding(input);
-      await bb.sdk.threads.open({ threadId: result.threadId, file: null });
       return result;
     },
     beginLogin: () => {

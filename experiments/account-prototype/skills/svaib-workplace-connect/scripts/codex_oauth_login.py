@@ -292,7 +292,7 @@ def login(
         )
     check_binding()
     if matches[0].get("authStatus") == "oAuth":
-        return  # Preserve the working native grant; BB still verifies its own fresh proof.
+        return  # Preserve the working native grant; verify native whoami in the resumed conversation.
     if matches[0].get("authStatus") != "notLoggedIn":
         raise LoginError(
             "Состояние входа Codex не подтверждено. Подключение не изменено."
@@ -308,7 +308,7 @@ def login(
     check_binding()
     browser(started["authorizationUrl"])
     print(
-        "Подтверди вход в браузере. После перерыва нажми «Продолжить подключение» в BB; выполненные шаги сохранятся.",
+        "Подтверди вход в браузере. После перерыва нажми «Продолжить» у нужного шага в BB; агент проверит сохранённый вход.",
         flush=True,
     )
     matches = lambda obj: (

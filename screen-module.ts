@@ -183,9 +183,8 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
     }
     return false;
   }
-  bb.rpc.register(screenRpcContract, {
-    'screen.openCompany': input => respond(async () => {
-      const active = requestSignal();
+  const openCompany = (input: { threadId: string; companyId: string; companyName: string; screenId?: string }, signal?: AbortSignal) => respond(async () => {
+      const active = requestSignal(signal);
       const live = await native.resolve(input.threadId, active, input.companyId);
       async function remote(name: string, args: Record<string, unknown>) {
         const raw = await options.account.callMcpForContext({ name, arguments: { ...args, company_id: live.context.company_id } }, { ...live.context, epoch: live.epoch }, active);
@@ -217,7 +216,9 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
         }
       }
       return choose(true);
-    }),
+  });
+  bb.rpc.register(screenRpcContract, {
+    'screen.openCompany': input => openCompany(input),
     'screen.binding': input => respond(async () => {
       const active = requestSignal();
       const value = await bb.storage.kv.get(bindingKey(input.threadId));
@@ -258,9 +259,19 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
   bb.agents.registerTool({ name: BIND_TOOL, description: 'Показать существующий серверный MCP Screen в этом разговоре BB. При первом вызове в пустой папке передай ID выбранной реальной компании; привязка и права проверяются сервером. Файлы не изменяются.',
     parameters: selectionSchema, execute: async ({ screenId, companyId }, ctx) =>
       JSON.stringify(await respond(() => bind(ctx.threadId, screenId, requestSignal(ctx.signal), companyId))) });
-  bb.agents.registerTool({ name: OPEN_TOOL, description: 'Открыть серверный MCP Screen и конструктор каркаса в этом разговоре BB. Использует вход кабинета плагина и подтверждённое членство. При первом вызове до каркаса передай companyId выбранной реальной компании. Подтверждение структуры не создаёт файлы.',
-    parameters: selectionSchema.extend({ create: z.object({ requestId: z.string().regex(/^[a-zA-Z0-9-]{1,100}$/), companyName: z.string().min(1).max(2000) }).strict().optional() }).strict(),
-    execute: async ({ screenId, create, companyId }, ctx) => JSON.stringify(await respond(() => openScreen(ctx.threadId, screenId, companyId, create, requestSignal(ctx.signal)))) });
+  bb.agents.registerTool({ name: OPEN_TOOL, description: 'Открыть конструктор выбранной реальной компании в текущем разговоре BB. Передай companyId и companyName без screenId: сервер найдёт существующий Screen, при нескольких вернёт выбор; ID не угадывай. Новый каркас создаётся только в пустой папке при доказанном отсутствии прежнего Screen. Явный screenId сохраняет прежний режим открытия. Подтверждение структуры не создаёт файлы.',
+    parameters: selectionSchema.partial({ screenId: true }).extend({ companyName: z.string().min(1).max(2000).optional(), create: z.object({ requestId: z.string().regex(/^[a-zA-Z0-9-]{1,100}$/), companyName: z.string().min(1).max(2000) }).strict().optional() }).strict(),
+    execute: async ({ screenId, create, companyId, companyName }, ctx) => {
+      if (screenId) return JSON.stringify(await respond(() => openScreen(ctx.threadId, screenId, companyId, create, requestSignal(ctx.signal))));
+      if (create) return JSON.stringify({ ok: false, error: { code: 'invalid_request', message: 'Для поиска по компании передай companyId без create; ID нового Screen определит система.' } });
+      return JSON.stringify(await respond(async () => {
+        const active = requestSignal(ctx.signal);
+        const selected = companyId ?? (await native.resolve(ctx.threadId, active)).context.company_id;
+        const result = await openCompany({ threadId: ctx.threadId, companyId: selected, companyName: companyName ?? selected }, active);
+        if (!result.ok) throw new ScreenContextError(result.error.code, result.error.message);
+        return result.value;
+      }));
+    } });
   bb.agents.registerTool({ name: EXISTING_TOOL, description: 'Показать ограниченный снимок существующей рабочей папки в Screen. Корень берётся только из проверенной среды BB; роли передаются агентом с основанием. Нераскрытые ветки защищены; снимок предназначен для обзора, не для файловых изменений.',
     parameters: selectionSchema.extend({ requestId: z.string().regex(/^[a-zA-Z0-9-]{1,100}$/), companyName: z.string().min(1).max(100),
       roles: z.record(z.string().min(1).max(500), z.object({ role: z.enum(['unit', 'aspect', 'kit', 'infrastructure', 'workspace']), source: z.string().min(1).max(800) }).strict()).optional(),
@@ -372,7 +383,7 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
   return {
     configure(_context: PluginAgentConfigurationContext): PluginAgentConfiguration {
       return { tools: [OPEN_TOOL, EXISTING_TOOL, OVERVIEW_TOOL, BIND_TOOL, RESULT_TOOL, PREVIOUS_TOOL], skills: [], instructions:
-        'Продолжи svaib:onboarding в текущем разговоре. Для Screen используй выбранную человеком компанию и текущую постоянную папку проекта BB: вызови svaib_screen_open с companyId или svaib_screen_bind для выбранного прежнего Screen. Инструмент сам проверит среду и доступ; не запускай новое подключение и не вызывай svaib_choose_folder, если текущая папка подходит. Если инструмент сообщает, что нужна постоянная папка, помоги человеку выбрать проект или папку штатными средствами BB; не выбирай её за человека. Для прежнего Screen вызови svaib_screen_previous и уточни выбор, если их несколько. Не утверждай, что вкладка открыта, при presentation=not-opened: предложи кнопку «Конструктор» в разговоре. После подтверждения получи svaib_screen_result и продолжи через space-scaffold с необходимыми согласиями и проверкой файлов. Pending не разрешает создавать файлы; Screen не разрешает затирать чужое. Не выдумывай компанию и не записывай credentials.' };
+        'Продолжи svaib:onboarding в текущем разговоре. Для Screen используй выбранную человеком компанию и текущую постоянную папку проекта BB: вызови svaib_screen_open с companyId и companyName без screenId. Инструмент сам выполнит серверный поиск, проверит среду и доступ; не запускай новое подключение, если текущая папка подходит. Если инструмент сообщает, что нужна постоянная папка, помоги человеку выбрать проект или папку штатными средствами BB; не выбирай её за человека. Если сервер вернул несколько choices, уточни выбор по названиям и датам; выбранный ID передай в svaib_screen_bind. Не угадывай ID. Не утверждай, что вкладка открыта, при presentation=not-opened: предложи кнопку «Конструктор» в разговоре. После подтверждения получи svaib_screen_result и продолжи через space-scaffold с необходимыми согласиями и проверкой файлов. Pending не разрешает создавать файлы; Screen не разрешает затирать чужое. Не выдумывай компанию и не записывай credentials.' };
     }, dispose,
   };
 }

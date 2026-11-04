@@ -3,7 +3,7 @@ import { accountIdentity, accountViewSchema, meSchema, visibleMeSchema, hasCompa
 import { companySelector, SvaibApi } from './api';
 import { OAuthConnection } from './oauth';
 import { MCP_RESOURCE, SvaibMcp, type McpToolResult } from './mcp';
-import { challengeSchema, checkProofTime, opaqueProof, verifiedProofSchema, type WorkplaceIdentity } from './workplace-proof';
+import type { WorkplaceIdentity } from './workplace-identity';
 import { continuationInputSchema } from './continuation';
 
 export interface VerifiedCompany { account_id: string; company_id: string; subject_id: string; epoch: number }
@@ -146,36 +146,6 @@ export class AccountController {
       if (!progress.success) return unavailable;
       return { status: 'available', onboarding: progress.data, nextStep: null, role: facts.role as 'owner' | 'member' };
     } catch { signal?.throwIfAborted(); return unavailable; }
-  }
-
-  private async workplaceCall(name: 'begin_workplace_proof' | 'verify_workplace_proof', arguments_: Record<string, unknown>, signal?: AbortSignal) {
-    const expected = await this.workplaceIdentity(signal);
-    const token = await this.oauth.token();
-    if (!token || expected.epoch !== this.oauth.epoch) throw new AccountAccessError('context_changed');
-    const result = await this.mcp.callResult(token, name, arguments_, signal);
-    const actual = await this.workplaceIdentity(signal);
-    if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new AccountAccessError('context_changed');
-    if (result.isError) {
-      const reason = (result.structuredContent as { reason?: unknown } | undefined)?.reason;
-      // Never expose a server response body containing an opaque receipt to error logs/model.
-      const safe = new Set(['workplace-proof-unavailable', 'reauthentication_required', 'workplace-proof-invalid',
-        'workplace-proof-expired', 'workplace-account-mismatch', 'workplace-client-mismatch']);
-      throw new AccountAccessError(typeof reason === 'string' && safe.has(reason) ? reason : 'workplace-proof-unavailable');
-    }
-    return { facts: result.structuredContent, identity: actual };
-  }
-
-  async beginWorkplaceProof(signal?: AbortSignal) {
-    const { facts } = await this.workplaceCall('begin_workplace_proof', {}, signal);
-    const challenge = challengeSchema.parse(facts); checkProofTime(challenge); return challenge;
-  }
-
-  async verifyWorkplaceProof(proof: string, signal?: AbortSignal) {
-    const { facts, identity } = await this.workplaceCall('verify_workplace_proof', { proof: opaqueProof.parse(proof) }, signal);
-    const verified = verifiedProofSchema.parse(facts); checkProofTime(verified);
-    if (verified.account_id !== identity.account_id || verified.verifier_client_id !== identity.client_id ||
-        verified.issuer_client_id === identity.client_id) throw new AccountAccessError('workplace-client-mismatch');
-    return verified;
   }
 
   /** Backend-only: no company selection is persisted and no token is returned. */

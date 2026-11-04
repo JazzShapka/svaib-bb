@@ -9,7 +9,6 @@ import type { ActionContext, ActionPreview, Overview, SourceDocument, SourceRef,
 import { discoverSkills, enrichWorkspaceActions, type SkillCatalog } from './skills';
 import { applyMetricsUpdate } from './metrics-update';
 import { registerAccountModule } from './experiments/account-prototype/account-module';
-import { journeyContract, journeyStatus } from './experiments/account-prototype/journey-status';
 import { CONNECTION_SKILL } from './experiments/account-prototype/connection';
 import { registerScreenModule } from './screen-module';
 import type { PersistentRootValidator } from './screen-native-context';
@@ -176,10 +175,6 @@ async function initializePlugin(bb: BbPluginApi, validatePersistentRootForTestin
     read: async () => (await settings.get()).productionOAuthSession ?? '',
     write: async value => { await settings.experimental_set({ productionOAuthSession: value || null }); },
   } });
-  bb.rpc.register(journeyContract, {
-    journeyStatus: input => journeyStatus({ sdk: bb.sdk, account: account.account, flow: account.connection,
-      observation: account.nativeObservation }, input),
-  });
   const screen = registerScreenModule(bb, { account, validatePersistentRootForTesting });
   // No agent, source-content read, external write or schedule at plugin load.
   const workplaceConfiguration = (context: PluginAgentConfigurationContext): PluginAgentConfiguration => {
@@ -219,7 +214,7 @@ async function initializePlugin(bb: BbPluginApi, validatePersistentRootForTestin
     // actual account/company/workspace on every call.
     const configuredSetup = setup && (base.tools?.length ?? 0) > 0;
     const visual = supported && (!setup || finishedSetup || configuredSetup) ? screen.configure(context) : { tools: [], skills: [] };
-    const ordinaryScreenGuidance = 'Если человек просит открыть или продолжить конструктор пространства, используй svaib_screen_previous или svaib_screen_open в текущем проекте BB. Сам инструмент проверит папку и доступ; предварительные shell-команды и svaib_choose_folder для этого не нужны. Если папка не подходит, следуй сообщению инструмента.';
+    const ordinaryScreenGuidance = 'Если человек просит открыть или продолжить конструктор пространства, вызови svaib_screen_open в текущем проекте BB с выбранными companyId и companyName без screenId: система найдёт доступные Screen и при нескольких предложит выбор. Не придумывай ID. Сам инструмент проверит папку и доступ; предварительные shell-команды не нужны. Если папка не подходит, следуй сообщению инструмента.';
     const instructions = configuredSetup && base.instructions && visual.instructions
       ? `${base.instructions}\n\nПосле успешного whoami, если согласованный сценарий включает подготовку пространства, продолжи его по правилам пользователя. ${visual.instructions}`
       : supported && !own ? [base.instructions, ordinaryScreenGuidance].filter(Boolean).join('\n\n') : base.instructions;

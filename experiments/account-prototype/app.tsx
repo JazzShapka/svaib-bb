@@ -7,6 +7,9 @@ import type { PluginNavPanelProps } from '@get-bb/plugin-sdk/app';
 import type { ConnectFlowView } from './connect-flow';
 import catalog from './onboarding-catalog.json';
 import { PartnerSetup } from './PartnerSetup';
+import { OnboardingJourney } from './OnboardingJourney';
+import { setupSteps, setupTasks } from './onboarding-start';
+import { nextOnboardingStages } from './onboarding-stages';
 import './app.css';
 import './onboarding-journey.css';
 
@@ -22,6 +25,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   const [comparison, setComparison] = useState<'unknown' | 'match' | 'mismatch'>('unknown');
   const [nativeHost, setNativeHost] = useState<string | null>(null);
   const [progress, setProgress] = useState<OnboardingView | null>(null);
+  const [accountProgress, setAccountProgress] = useState<OnboardingView | null>(null);
   const [selectionLoaded, setSelectionLoaded] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,7 +43,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       if (request !== sequence.current) return;
       const identity = account.state === 'connected' ? account.me?.account_id ?? null : null;
       if (identity !== currentAccount.current) {
-        setProgress(null); setSelectionLoaded(false);
+        setProgress(null); setAccountProgress(null); setSelectionLoaded(false);
         const saved = identity ? await rpc.call('selectedCompany').catch(() => ({ company_id: null })) : { company_id: null };
         if (request !== sequence.current) return;
         currentAccount.current = identity;
@@ -56,8 +60,11 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       const cached = identity ? progressCache.get(progressKey) : undefined;
       if (cached) setProgress(cached);
       void rpc.call('onboardingProgress', { company_id: companyId || null }).then(value => {
-        if (request === sequence.current) { if (identity && value.status === 'available') { progressCache.set(progressKey, value); if (progressCache.size > 20) progressCache.delete(progressCache.keys().next().value!); } setProgress(value); }
+        if (request === sequence.current) { if (identity && value.status === 'available') { progressCache.set(progressKey, value); if (progressCache.size > 20) progressCache.delete(progressCache.keys().next().value!); } setProgress(value); if (!companyId) setAccountProgress(value); }
       }).catch(() => { if (request === sequence.current) setProgress({ status: 'unavailable', onboarding: null, nextStep: null, role: null }); });
+      if (companyId) void rpc.call('onboardingProgress', { company_id: null }).then(value => {
+        if (request === sequence.current) setAccountProgress(value);
+      }).catch(() => { if (request === sequence.current) setAccountProgress(null); });
       if (companyId && (!account.me || !selected.me || selected.state !== 'connected' ||
           accountIdentity(account.me) !== accountIdentity(selected.me) || !hasCompanyMembership(selected.me) ||
           selected.me.tenant_id !== companyId)) {
@@ -73,7 +80,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   }, [rpc, companyId]);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => () => { sequence.current++; }, []);
-  useRealtime('account-changed', () => { setProgress(null); setScreenChoices(null); setSelectionLoaded(false); currentAccount.current = undefined; void refresh(); });
+  useRealtime('account-changed', () => { setProgress(null); setAccountProgress(null); setScreenChoices(null); setSelectionLoaded(false); currentAccount.current = undefined; void refresh(); });
   useEffect(() => { setScreenChoices(null); }, [companyId]);
   // Account marks can also change outside BB, e.g. in Telegram. Re-read when
   // the person returns to this window, without background polling.
@@ -94,11 +101,13 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     catch (e) { setError(e instanceof Error ? e.message : 'Действие не завершено. Повтори обновление.'); }
     finally { setBusy(false); }
   }
-  function continueJourney(stageTitle?: string) {
+  function continueJourney(stepId?: string) {
     const company = companies.find(item => item.company_id === companyId);
     const choice = company ? ` Моя компания: ${company.company_name || company.tenant_name || (view?.me?.tenant_id === company.company_id && view.me.tenant_name) || company.company_id} (ID: ${company.company_id}).` : '';
+    const task = setupTasks.find(item => item.id === stepId);
+    const stageTitle = task?.title || catalog.stages.find(item => item.id === stepId)?.title;
     const stage = stageTitle ? ` Хочу продолжить: «${stageTitle}».` : '';
-    navigate.toCompose({ initialPrompt: `Помоги продолжить настройку svaib.${stage}${choice} Продолжим в папке текущего проекта.`, focusPrompt: false });
+    navigate.toCompose({ initialPrompt: `${task?.prompt || 'Помоги продолжить настройку svaib.'}${stage}${choice} Продолжим в папке текущего проекта.`, focusPrompt: false });
   }
   async function openConstructor(screenId?: string) {
     if (!companyId) return;
@@ -112,34 +121,24 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     setScreenChoices(null);
     if (result.value.presentation !== 'tab-opened') setError('Конструктор подготовлен. Открой вкладку «Конструктор» в текущем разговоре.');
   }
-  const marks = progress?.status === 'available' ? progress.onboarding.marks : {};
-  const audience = progress?.status === 'available' ? progress.onboarding.audience || (progress.role === 'owner' ? 'ceo' : progress.role === 'member' ? 'employee' : null) : null;
-  const stages = catalog.stages.filter(stage => stage.track === 'user' && stage.active && (stage.kind === 'base' ||
-    (stage.kind === 'tool' && progress?.status === 'available' && progress.onboarding.tools.includes(stage.id))) &&
-    (!stage.audiences.length || (!!audience && (stage.audiences as string[]).includes(audience))) && marks[stage.id]?.state !== 'skip').sort((a, b) => a.order - b.order);
-  const completed = (stage: typeof stages[number]) => marks[stage.id]?.state === 'done' || (!marks[stage.id] && stage.replaces.some(id => marks[id]?.state === 'done'));
-  const first = stages.find(stage => !completed(stage));
-  const currentIndex = first ? stages.indexOf(first) : stages.length;
-  const windowStart = currentIndex < 4 ? 0 : Math.max(0, currentIndex - 1);
-  const visibleStages = stages.slice(windowStart, currentIndex < 4 ? 4 : currentIndex + 3);
+  const setup = setupSteps({ accountReady: view?.state === 'connected', companySelected: !!companyId,
+    accountProgress, progress });
+  const setupComplete = setup.every(step => step.state === 'done');
+  const next = progress?.status === 'available' ? nextOnboardingStages(catalog, progress.onboarding, progress.role) : null;
   return <div className="svaib-account-viewport"><main className="svaib-account">
     <header><span className="svaib-account-mark">s.</span><div><p className="svaib-account-eyebrow">{production ? 'svaib' : 'Тестовый контур · Staging'}</p><h1>Моё рабочее место</h1></div></header>
     <p className="svaib-account-note">{production ? 'Работа с партнёром и твоими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
-    <section className="svaib-journey"><h2>Твой путь</h2>
-      {view?.state === 'signed-out' ? <><p>Войди в svaib, чтобы продолжить настройку и выбрать компанию.</p>
-        <button className="svaib-journey-action" disabled={busy} onClick={() => void act(async () => { await rpc.call('startCabinetLogin'); await refresh(); })}>Войти в svaib</button></> :
+      {view?.state === 'signed-out' ? <section className="svaib-journey"><h2>Твой путь</h2><p>Войди в svaib, чтобы продолжить настройку и выбрать компанию.</p>
+        <button className="svaib-journey-action" disabled={busy} onClick={() => void act(async () => { await rpc.call('startCabinetLogin'); await refresh(); })}>Войти в svaib</button></section> :
       view?.state === 'waiting' ? <p role="status">Заверши вход в открывшемся браузере.</p> :
       !selectionLoaded || !progress ? <p role="status">Проверяю этапы…</p> : progress.status === 'unavailable' ?
-        <p role="status">Не удалось загрузить этапы. Можно продолжить работу с партнёром.</p> :
-        <ol className="svaib-journey-list">{visibleStages.map((stage, index) => {
-          const mark = marks[stage.id]?.state;
-          const done = completed(stage);
-          return <li key={stage.id} className={`svaib-journey-step ${done ? 'svaib-journey-step--done' : stage === first ? 'svaib-journey-step--current' : ''}`}>
-            <span className="svaib-journey-number">{done ? '✓' : windowStart + index + 1}</span><div className="svaib-journey-copy"><div className="svaib-journey-step-header"><h3>{stage.title}</h3><span className="svaib-journey-status">{done ? 'Готово' : mark === 'waiting' ? 'Ожидает' : mark === 'deferred' ? 'Отложено' : mark === 'unverified' ? 'Не проверено' : stage === first ? 'Сейчас' : 'Предстоит'}</span></div>
-            {!done && stage === first && <button type="button" className="svaib-journey-action" disabled={busy} onClick={() => continueJourney(stage.title)}>Продолжить</button>}</div></li>;
-        })}</ol>}
-      {view?.state !== 'signed-out' && view?.state !== 'waiting' && selectionLoaded && progress?.status === 'unavailable' && <button type="button" className="svaib-journey-action" onClick={() => continueJourney()}>Продолжить</button>}
-    </section>
+        <section className="svaib-journey"><h2>Твой путь</h2>
+          <p role="status">Не удалось загрузить этапы. Можно продолжить работу с партнёром.</p>
+          <button type="button" className="svaib-journey-action" onClick={() => continueJourney()}>Продолжить</button>
+        </section> :
+        <OnboardingJourney setup={setup} setupComplete={setupComplete} busy={busy}
+          nextSteps={next?.stages.map(stage => ({ id: stage.id, title: stage.title, state: stage.state ?? 'next' })) ?? []}
+          stagesAvailable={next?.status === 'available'} onContinue={continueJourney} />}
     {error && <p role="alert" className="svaib-account-error">{error}</p>}
     {!view ? !error && <p role="status">Проверяю подключение…</p> : <>
       {view.message && <p role="status">{view.message}</p>}

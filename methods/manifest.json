@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "sourceRevision": "684995c428775dff9a436dcca230ae4c2d0d6a1e",
+  "sourceRevision": "222c574f5f4d5a20dc61f2376edd5971de2f8df9",
   "providers": {
     "codex": {
       "root": "methods/codex",
@@ -440,5 +440,6 @@
         "plugins/svaib/skills/transcript-extract/SKILL.md": "d85a8e7440eb02f1c3073872558b89c45707867c9f96e954f9dbe3077c78868a"
       }
     }
-  }
+  },
+  "onboardingCatalogSha256": "4b2939afc789249a8f330b671ee29f62b769ea396d8a90b3273cec50aac1d8d0"
 }

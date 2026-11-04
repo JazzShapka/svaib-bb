@@ -44,7 +44,7 @@ function finishPage(response: ServerResponse, ok: boolean, expired = false) {
     'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
     'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer',
   });
-  response.end(`<!doctype html><html lang="ru"><meta charset="utf-8"><title>svaib</title><h1>${ok ? 'Вход выполнен' : expired ? 'Время входа истекло' : 'Вход не завершён'}</h1><p>${ok ? 'Вернись в BB. Это окно можно закрыть.' : 'Вернись в BB на страницу svaib и нажми «Продолжить подключение». Уже работающие входы сохранятся.'}</p></html>`);
+  response.end(`<!doctype html><html lang="ru"><meta charset="utf-8"><title>svaib</title><h1>${ok ? 'Вход выполнен' : expired ? 'Время входа истекло' : 'Вход не завершён'}</h1><p>${ok ? 'Вернись в BB. Это окно можно закрыть.' : 'Вернись в BB на страницу svaib и продолжи разговор с партнёром. Уже работающие входы сохранятся.'}</p></html>`);
 }
 
 /** One account per local BB server. No credentials ever leave this backend. */
