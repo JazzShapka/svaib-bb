@@ -11,19 +11,25 @@ import { PartnerSetup } from './PartnerSetup';
 import { COMPANY_FOLDER_PROMPT } from './folder-contract';
 import './app.css';
 
+const signedOut: AccountView = { state: 'signed-out', message: '', me: null, profile: null, canEdit: false };
+function journeyIdentity(account: AccountView, context: { projectId: string | null; threadId: string | null }) {
+  return [account.me ? accountIdentity(account.me) : 'signed-out', account.me?.tenant_id ?? '', context.projectId ?? '', context.threadId ?? ''].join(':');
+}
+
 export function AccountPage({ production = false }: { production?: boolean } = {}) {
   const context = useBbContext();
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const journeyRpc = useRpc<typeof journeyContract>();
   const [view, setView] = useState<AccountView | null>(null);
+  const [accountView, setAccountView] = useState<AccountView>(signedOut);
   const [connection, setConnection] = useState<ConnectFlowView | null>(null);
   const [journey, setJourney] = useState<JourneyStatus | null>(null);
+  const [journeyKey, setJourneyKey] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [companyId, setCompanyId] = useState('');
   const [companies, setCompanies] = useState<NonNullable<NonNullable<AccountView['me']>['companies']>>([]);
-  const needsConnection = connection?.stage !== 'ready' && (view?.state !== 'connected' || !!connection?.threadId);
   const sequence = useRef(0);
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
@@ -32,10 +38,16 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       const [account, flow] = await Promise.all([rpc.call('status', null), rpc.call('connectionStatus').catch(() => null)]);
       const selected = companyId ? await rpc.call('status', { company_id: companyId }) : account;
       if (request !== sequence.current) return;
+      const nextJourneyKey = journeyIdentity(account, context);
+      if (nextJourneyKey !== journeyKey) { setJourney(null); setJourneyKey(nextJourneyKey); }
+      setAccountView(account);
       setCompanies(account.me?.companies ?? []);
-      setJourney({ workplace: false, account: account.state === 'connected', space: false, firstWork: false,
-        nextStep: null, nextStages: [], stagesAvailable: false });
-      void progressRequest.then(progress => { if (request === sequence.current && progress) setJourney(progress); });
+      void progressRequest.then(progress => {
+        if (request !== sequence.current) return;
+        if (progress) setJourney(progress);
+        else setJourney(current => current ?? { workplace: false, account: account.state === 'connected', space: false, firstWork: false,
+          nextStep: null, nextStages: [], stagesAvailable: false });
+      });
       if (companyId && (!account.me || !selected.me || selected.state !== 'connected' ||
           accountIdentity(account.me) !== accountIdentity(selected.me) || !hasCompanyMembership(selected.me) ||
           selected.me.tenant_id !== companyId)) {
@@ -46,7 +58,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       setView(selected); setConnection(flow); setError(flow ? '' : 'Не удалось загрузить статус настройки. Обнови страницу или начни обычный разговор в BB.');
     }
     catch { if (request === sequence.current) { setView(null); setCompanies([]); setError('Не удалось загрузить подключение. Повтори обновление.'); } }
-  }, [rpc, journeyRpc, companyId, context.projectId, context.threadId]);
+  }, [rpc, journeyRpc, companyId, context.projectId, context.threadId, journeyKey]);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => () => { sequence.current++; }, []);
   useRealtime('account-changed', () => { void refresh(); });
@@ -69,14 +81,8 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     catch (e) { setError(e instanceof Error ? e.message : 'Действие не завершено. Повтори обновление.'); }
     finally { setBusy(false); }
   }
-  async function openConnection() {
-    // Recheck on every click: the conversation may have been deleted since refresh.
-    const next = await rpc.call('connect', { projectId: context.projectId, threadId: context.threadId,
-      ...(['cabinet', 'error'].includes(connection?.stage ?? '') || connection?.retryable ? { restartCabinet: true } : {}) });
-    setConnection(next);
-    if (!next.threadId && next.stage === 'error') setError(next.message);
-  }
   async function continueJourney(stepId: string) {
+    if (!journey || journeyKey !== journeyIdentity(accountView, context)) return;
     if (stepId === 'space') {
       if (connection?.stage !== 'ready' || !connection.binding) throw new Error('Сначала заверши подключение партнёра.');
       navigate.toCompose({ hostId: connection.binding.hostId, initialPrompt: COMPANY_FOLDER_PROMPT, focusPrompt: false });
@@ -98,14 +104,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     <p className="svaib-account-note">{production ? 'Работа с партнёром и твоими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
     {journey && <OnboardingJourney setup={setup} setupComplete={setupComplete} nextSteps={journey.nextStages} stagesAvailable={journey.stagesAvailable} busy={busy}
       onContinue={stepId => { void act(() => continueJourney(stepId)); }} />}
-    {!journey && <section><h2>Партнёр svaib</h2>
-      {!needsConnection ? <p>{connection?.stage === 'ready' ? 'Партнёр подключён.' : 'Кабинет подключён.'} Начни обычный разговор в BB.</p> : <>
-        <p>{view?.state === 'connected' ? 'Кабинет подключён. Осталось проверить доступ партнёра.' : 'Агент подготовит svaib к работе. Тебе останется подтвердить вход в браузере.'}</p>
-        {connection?.message && <p role="status">{connection.message}</p>}
-        {connection?.stage === 'cabinet' && <p>Код истёк или страница не открывается? «Продолжить подключение» откроет новый вход в браузере. Уже выполненные шаги сохранятся.</p>}
-        <button className="svaib-account-button svaib-account-primary" disabled={busy} onClick={() => void act(openConnection)}>{connection?.threadId ? 'Продолжить подключение' : 'Подключить svaib'}</button>
-      </>}
-    </section>}
+    {!journey && <section><p role="status">Проверяю текущий шаг…</p></section>}
     {error && <p role="alert" className="svaib-account-error">{error}</p>}
     {!view ? !error && <p role="status">Проверяю подключение…</p> : <>
       {view.message && <p role="status">{view.message}</p>}

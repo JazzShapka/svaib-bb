@@ -62,7 +62,7 @@ export function connectionConfiguration(context: PluginAgentConfigurationContext
     actual[key as keyof typeof actual] !== expected[key as keyof ConnectionBinding]))) return unsupported;
   const workspaceNote = metadata.data.continuation?.data.scope === 'onboarding'
     ? context.environment.workspaceProvisionType === 'personal'
-      ? 'Это временная служебная папка BB, а не выбранная пользователем постоянная папка организации. Не предлагай размещать в ней материалы компании: BB может удалить её после удаления или архивирования всех связанных разговоров. Постоянную папку человек выбирает в штатном новом разговоре BB через Project → New project или существующий проект. '
+      ? 'Это временная служебная папка BB, а не выбранная пользователем постоянная папка организации. Не предлагай размещать в ней материалы компании: BB может удалить её после удаления или архивирования всех связанных разговоров. Постоянную папку человек выбирает в штатном новом разговоре BB через No project → New project или существующий проект и оставляет Project checkout. Git не нужен. '
       : 'Папка проекта BB сама по себе не подтверждает, что пользователь выбрал её для пространства организации. Учитывай уже подтверждённый выбор; иначе уточни его. '
     : '';
   if (metadata.data.unified) return {

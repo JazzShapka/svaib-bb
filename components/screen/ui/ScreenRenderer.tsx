@@ -49,25 +49,36 @@ export type ScreenTransport = {
   subscribe?(invalidate: () => void): () => void;
 };
 
-export function ScreenSurface(props: { transport: ScreenTransport; invalidate?: number }) {
-  return <div className="screen-frame"><ScreenContent {...props} /></div>;
+const snapshots = new Map<string, Screen>();
+const SNAPSHOT_LIMIT = 20;
+export function clearScreenSnapshots() { snapshots.clear(); }
+function rememberSnapshot(key: string | undefined, screen: Screen) {
+  if (!key) return;
+  snapshots.delete(key); snapshots.set(key, screen);
+  while (snapshots.size > SNAPSHOT_LIMIT) snapshots.delete(snapshots.keys().next().value!);
 }
 
-function ScreenContent({ transport, invalidate = 0 }: { transport: ScreenTransport; invalidate?: number }) {
-  const [screen, setScreen] = useState<Screen | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+export function ScreenSurface(props: { transport: ScreenTransport; invalidate?: number; cacheKey?: string }) {
+  return <div className="screen-bb-page"><div className="screen-frame"><ScreenContent {...props} /></div></div>;
+}
+
+function ScreenContent({ transport, invalidate = 0, cacheKey }: { transport: ScreenTransport; invalidate?: number; cacheKey?: string }) {
+  const cached = cacheKey ? snapshots.get(cacheKey) : undefined;
+  const [screen, setScreen] = useState<Screen | null>(cached ?? null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(cached?.submission?.selectedIds ?? []));
   const [filter, setFilter] = useState('all');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [online, setOnline] = useState(false);
   const sequence = useRef(0);
-  const latest = useRef<Screen | null>(null);
+  const latest = useRef<Screen | null>(cached ?? null);
   const alive = useRef(true);
   function receive(next: Screen) {
     const previous = latest.current;
     if (previous?.id === next.id && previous.revision > next.revision) return;
     const sharedChoiceChanged = previous?.id !== next.id || previous?.submission?.revision !== next.submission?.revision;
     latest.current = next;
+    rememberSnapshot(cacheKey, next);
     setScreen(next); setOnline(true);
     const ids = new Set(next.document.blocks.flatMap(block => block.type === 'tasks' ? block.items.map(task => task.id) : []));
     setSelected(current => new Set((sharedChoiceChanged ? next.submission?.selectedIds ?? [] : [...current]).filter(id => ids.has(id))));
@@ -81,7 +92,8 @@ function ScreenContent({ transport, invalidate = 0 }: { transport: ScreenTranspo
     } catch (cause) { if (alive.current && current === sequence.current) { setOnline(false); setError(String((cause as Error).message)); } }
   };
   useEffect(() => {
-    alive.current = true; latest.current = null; setScreen(null); setSelected(new Set()); setError(''); void load();
+    alive.current = true; latest.current = cached ?? null; setScreen(cached ?? null);
+    setSelected(new Set(cached?.submission?.selectedIds ?? [])); setError(''); void load();
     const unsubscribe = transport.subscribe?.(() => void load());
     return () => { alive.current = false; ++sequence.current; unsubscribe?.(); };
   }, [transport]);

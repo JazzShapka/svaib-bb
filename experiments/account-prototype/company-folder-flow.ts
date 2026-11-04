@@ -48,7 +48,7 @@ export function createCompanyFolderFlow(d: CompanyFolderDependencies) {
     const system = await d.sdk.system.config();
     if (environment.id !== thread.environmentId || environment.projectId !== thread.projectId || environment.status !== 'ready' ||
         environment.workspaceProvisionType !== 'unmanaged' || !environment.path || !system.primaryHostId || environment.hostId !== system.primaryHostId)
-      throw new Error('Сначала выбери постоянную папку через Project → New project или существующий проект BB. Временная папка не подходит.');
+      throw new Error('Сначала выбери постоянную папку через No project → New project или существующий проект и оставь Project checkout. Временная папка не подходит.');
     const path = await validatePath(environment.hostId, environment, environment.path);
     const project = await d.sdk.projects.get({ projectId: thread.projectId });
     if (!exactProject(project, environment.hostId, path)) throw new Error('Папка должна быть единственным основным локальным источником выбранного проекта BB.');

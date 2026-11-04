@@ -50,15 +50,23 @@ export async function persistentFolderExclusions(sdk: FolderInventory,
     throw new Error('Не удалось проверить расположение BB.');
   const paths = [...(options?.systemExclusions ?? [system.dataDir, join(homedir(), '.bb'), tmpdir(),
     ...(process.platform === 'win32' ? [] : ['/tmp', '/var/tmp'])])];
-  const addManaged = (other: FolderEnvironment) => {
+  const selectedRoot = env.path && isAbsolute(env.path) ? env.path : null;
+  const strictAncestor = (parent: string, child: string) => {
+    const rel = relative(parent, child);
+    return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  };
+  const addManaged = (other: FolderEnvironment, selected = false) => {
     if (other.hostId !== hostId || typeof other.managed !== 'boolean' || typeof other.isWorktree !== 'boolean' ||
         ![null, 'unmanaged', 'personal', 'managed-worktree'].includes(other.workspaceProvisionType))
       throw new Error('Не удалось проверить служебные папки BB.');
-    if (!other.managed && !other.isWorktree && other.workspaceProvisionType === 'unmanaged') return;
+    // Older BB records omit the provision type for ordinary user directories.
+    if (!other.managed && !other.isWorktree && [null, 'unmanaged'].includes(other.workspaceProvisionType)) return;
+    // A persistent parent may contain a BB worktree without becoming temporary itself.
+    if (!selected && other.isWorktree && other.path && selectedRoot && strictAncestor(selectedRoot, other.path)) return;
     if (!other.path || !isAbsolute(other.path)) throw new Error('Не удалось проверить служебные папки BB.');
     paths.push(other.path);
   };
-  addManaged(env);
+  addManaged(env, true);
   for (const status of [undefined, 'destroyed'] as const) {
     for (let offset = 0; ; offset += 100) {
       if (offset >= 1000) throw new Error('Не удалось проверить рабочие места BB.');

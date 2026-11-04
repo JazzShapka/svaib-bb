@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRpc, useRealtime, type PluginRpcClient } from '@get-bb/plugin-sdk/app';
 import type { screenRpcContract } from './screen-module';
 import { createScreenTransport, ScreenTransportError, type ScreenBackendPort } from './screen-transport';
-import { ScreenSurface } from 'bb-plugin-svaib-screen-pilot/renderer';
+import { ScreenSurface, clearScreenSnapshots } from 'bb-plugin-svaib-screen-pilot/renderer';
 
 type Rpc = PluginRpcClient<typeof screenRpcContract>;
 type Reply<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
@@ -44,18 +44,22 @@ export function screenRpcBackend(rpc: Rpc, threadId: string, screenId: string,
 export function ScreenPanel({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof screenRpcContract>();
   const [screenId, setScreenId] = useState<string | null>(null);
+  const [verifiedThread, setVerifiedThread] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
   const [loading, setLoading] = useState(true);
   useRealtime('screen-changed', payload => {
     if ((payload as { threadId?: string })?.threadId === threadId) setReload(value => value + 1);
   });
-  useRealtime('account-changed', () => { setScreenId(null); setReload(value => value + 1); });
+  useRealtime('account-changed', () => { clearScreenSnapshots(); setScreenId(null); setVerifiedThread(null); setLoading(true); setReload(value => value + 1); });
   useEffect(() => {
-    let live = true; setScreenId(null); setError(''); setLoading(true);
+    let live = true;
+    setScreenId(null); setVerifiedThread(null); setError(''); setLoading(true);
     void rpc.call('screen.binding', { threadId }).then(unwrap).then(value => {
-      if (live) setScreenId(value.screenId);
-    }, cause => { if (live) setError(cause instanceof Error ? cause.message : 'Не удалось открыть Screen.'); })
+      if (!live) return;
+      if (!value.screenId) clearScreenSnapshots();
+      setScreenId(value.screenId); setVerifiedThread(threadId);
+    }, cause => { if (live) { clearScreenSnapshots(); setError(cause instanceof Error ? cause.message : 'Не удалось открыть Screen.'); } })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [rpc, threadId, reload]);
@@ -66,8 +70,8 @@ export function ScreenPanel({ threadId }: { threadId: string }) {
     }),
   }), [rpc, threadId, screenId]);
   useEffect(() => () => transport.dispose(), [transport]);
-  if (loading) return <section className="sv-screen"><p role="status">Проверяю Screen этого разговора…</p></section>;
+  if (loading || (screenId && verifiedThread !== threadId)) return <section className="sv-screen"><p role="status">Проверяю Screen этого разговора…</p></section>;
   if (!screenId) return <section className="sv-screen"><p role={error ? 'alert' : 'status'}>{error || 'Попроси партнёра открыть Screen в этом разговоре. Он проверит подключение и выбранную компанию.'}</p>
     <button onClick={() => setReload(value => value + 1)}>Повторить проверку</button></section>;
-  return <ScreenSurface key={`${threadId}:${screenId}`} transport={transport} />;
+  return <ScreenSurface key={`${threadId}:${screenId}`} cacheKey={`${threadId}:${screenId}`} transport={transport} />;
 }
