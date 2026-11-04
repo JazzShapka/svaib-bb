@@ -98,7 +98,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     const company = companies.find(item => item.company_id === companyId);
     const choice = company ? ` Моя компания: ${company.company_name || company.tenant_name || (view?.me?.tenant_id === company.company_id && view.me.tenant_name) || company.company_id} (ID: ${company.company_id}).` : '';
     const stage = stageTitle ? ` Хочу продолжить: «${stageTitle}».` : '';
-    navigate.toCompose({ initialPrompt: `Помоги продолжить настройку svaib.${stage}${choice} Продолжим в папке текущего проекта.`, focusPrompt: false });
+    navigate.toCompose({ initialPrompt: `Помоги продолжить настройку svaib.${stage}${choice} Продолжим в папке текущего проекта. Локальная папка не является папкой Google Drive: подключение Drive и синхронизация не обязательны для создания пространства. Статус облачного источника не определяет готовность локальной папки.`, focusPrompt: false });
   }
   async function openConstructor(screenId?: string) {
     if (!companyId) return;
@@ -119,6 +119,9 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     (!stage.audiences.length || (!!audience && (stage.audiences as string[]).includes(audience))) && marks[stage.id]?.state !== 'skip').sort((a, b) => a.order - b.order);
   const completed = (stage: typeof stages[number]) => marks[stage.id]?.state === 'done' || (!marks[stage.id] && stage.replaces.some(id => marks[id]?.state === 'done'));
   const first = stages.find(stage => !completed(stage));
+  const currentIndex = first ? stages.indexOf(first) : stages.length;
+  const windowStart = currentIndex < 4 ? 0 : Math.max(0, currentIndex - 1);
+  const visibleStages = stages.slice(windowStart, currentIndex < 4 ? 4 : currentIndex + 3);
   return <div className="svaib-account-viewport"><main className="svaib-account">
     <header><span className="svaib-account-mark">s.</span><div><p className="svaib-account-eyebrow">{production ? 'svaib' : 'Тестовый контур · Staging'}</p><h1>Моё рабочее место</h1></div></header>
     <p className="svaib-account-note">{production ? 'Работа с партнёром и твоими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
@@ -128,11 +131,11 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       view?.state === 'waiting' ? <p role="status">Заверши вход в открывшемся браузере.</p> :
       !selectionLoaded || !progress ? <p role="status">Проверяю этапы…</p> : progress.status === 'unavailable' ?
         <p role="status">Не удалось загрузить этапы. Можно продолжить работу с партнёром.</p> :
-        <ol className="svaib-journey-list">{stages.map((stage, index) => {
+        <ol className="svaib-journey-list">{visibleStages.map((stage, index) => {
           const mark = marks[stage.id]?.state;
           const done = completed(stage);
           return <li key={stage.id} className={`svaib-journey-step ${done ? 'svaib-journey-step--done' : stage === first ? 'svaib-journey-step--current' : ''}`}>
-            <span className="svaib-journey-number">{done ? '✓' : index + 1}</span><div className="svaib-journey-copy"><div className="svaib-journey-step-header"><h3>{stage.title}</h3><span className="svaib-journey-status">{done ? 'Готово' : mark === 'waiting' ? 'Ожидает' : mark === 'deferred' ? 'Отложено' : mark === 'unverified' ? 'Не проверено' : stage === first ? 'Сейчас' : 'Предстоит'}</span></div>
+            <span className="svaib-journey-number">{done ? '✓' : windowStart + index + 1}</span><div className="svaib-journey-copy"><div className="svaib-journey-step-header"><h3>{stage.title}</h3><span className="svaib-journey-status">{done ? 'Готово' : mark === 'waiting' ? 'Ожидает' : mark === 'deferred' ? 'Отложено' : mark === 'unverified' ? 'Не проверено' : stage === first ? 'Сейчас' : 'Предстоит'}</span></div>
             {!done && stage === first && <button type="button" className="svaib-journey-action" disabled={busy} onClick={() => continueJourney(stage.title)}>Продолжить</button>}</div></li>;
         })}</ol>}
       {view?.state !== 'signed-out' && view?.state !== 'waiting' && selectionLoaded && progress?.status === 'unavailable' && <button type="button" className="svaib-journey-action" onClick={() => continueJourney()}>Продолжить</button>}

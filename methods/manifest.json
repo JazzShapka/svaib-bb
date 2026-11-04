@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "sourceRevision": "e88fdf00be00751ea724c851f61f4b8f36bd90de",
+  "sourceRevision": "532a76cfa9238789a954297c11f407c50095062c",
   "providers": {
     "codex": {
       "root": "methods/codex",
