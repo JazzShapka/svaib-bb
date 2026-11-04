@@ -1,12 +1,13 @@
 import { defineRpcContract, type BbPluginApi, type PluginAgentConfiguration, type PluginAgentConfigurationContext } from '@get-bb/plugin-sdk';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readdir } from 'node:fs/promises';
 import { z } from 'zod';
-import { FOLDER_TOOL } from './experiments/account-prototype/folder-selection';
 import { idSchema, screenSchema, submitSchema, updateSchema, confirmScaffoldSchema } from 'bb-plugin-svaib-screen-pilot/model';
 import { createScreenBackend, screenSnapshotSchema, screenEventsSchema, ScreenTransportError,
   type ScreenContext, type ScreenBackendPort } from './screen-transport';
 import { createScreenPluginContext, ScreenContextError, type ScreenAccountPort, type PersistentRootValidator } from './screen-native-context';
 import { scaffoldConfirmationSchema } from 'bb-plugin-svaib-screen-pilot/scaffold';
+import { importScaffold, verifyScaffoldSnapshot, ScaffoldImportError } from './scaffold-import';
 
 const threadIdSchema = z.string().regex(/^thr_[a-z0-9]+$/);
 const select = z.object({ threadId: threadIdSchema, screenId: idSchema }).strict();
@@ -18,6 +19,9 @@ const reply = <T extends z.ZodType>(value: T) => z.discriminatedUnion('ok', [
 // The canonical schemas are also Standard Schema compatible across package-local Zod copies.
 export const screenRpcContract = defineRpcContract({
   'screen.binding': { input: z.object({ threadId: threadIdSchema }).strict(), output: reply(z.object({ screenId: idSchema.nullable() }).strict()) },
+  'screen.openCompany': { input: z.object({ threadId: threadIdSchema, companyId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/), companyName: z.string().min(1).max(2000), screenId: idSchema.optional() }).strict(),
+    output: reply(z.union([z.object({ screenId: idSchema, revision: z.number(), cursor: z.number(), presentation: z.enum(['tab-opened', 'not-opened']), message: z.string() }).strict(),
+      z.object({ choices: z.array(z.object({ id: idSchema, title: z.string(), updatedAt: z.string(), kind: z.enum(['overview', 'scaffold']) }).strict()).min(2).max(100) }).strict()])) },
   'screen.get': { input: select, output: reply(screenSnapshotSchema) },
   'screen.submit': { input: select.extend({ mutation: submitSchema }), output: reply(z.object({ screen: screenSchema }).strict()) },
   'screen.update': { input: select.extend({ mutation: updateSchema }), output: reply(z.object({ screen: screenSchema }).strict()) },
@@ -33,6 +37,8 @@ const storedBinding = z.object({ schema: z.literal(1), screen_id: idSchema, cont
 }).strict(), real_root: z.string() }).strict();
 const bindingKey = (threadId: string) => 'screen:binding:' + threadId;
 const OPEN_TOOL = 'svaib_screen_open';
+const EXISTING_TOOL = 'svaib_screen_existing';
+const OVERVIEW_TOOL = 'svaib_screen_overview';
 const BIND_TOOL = 'svaib_screen_bind';
 const RESULT_TOOL = 'svaib_screen_result';
 const PREVIOUS_TOOL = 'svaib_screen_previous';
@@ -58,6 +64,7 @@ function knownError(error: unknown) {
   if (error instanceof Error && ['AbortError', 'TimeoutError'].includes(error.name))
     return { code: error.name === 'AbortError' ? 'aborted' : 'timeout', message: 'Ожидание Screen остановлено.' };
   if (error instanceof ScreenContextError) return { code: error.code, message: error.message };
+  if (error instanceof ScaffoldImportError) return { code: error.code, message: error.message };
   if (error instanceof ScreenTransportError) return { code: error.code, message: messages[error.code] ?? 'Screen отклонил запрос. Обнови экран или проверь подключение с партнёром.' };
   const accountCode = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
   if (['authentication_required', 'resource_mismatch', 'company_context_unavailable', 'context_changed', 'invalid_arguments', 'mcp_unavailable', 'mcp_protocol_error'].includes(accountCode))
@@ -119,6 +126,19 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
     const port = await backend(input.threadId, input.screenId, signal);
     try { return await run(port, signal); } finally { port.dispose(); }
   }
+  async function verifyOverviewSource(snapshot: z.infer<typeof screenSnapshotSchema>, live: Awaited<ReturnType<typeof native.resolve>>, screenId: string, active: AbortSignal) {
+    const blocks = snapshot.screen.document.blocks;
+    const config = blocks.length === 1 && blocks[0].type === 'scaffold' && blocks[0].config.schemaVersion === 2 ? blocks[0].config : null;
+    if (!config?.overview) return;
+    const source = z.object({ schema: z.literal(1), root: z.string(), hash: z.string() }).strict().safeParse(
+      await bb.storage.kv.get(`screen:overview:${live.context.company_id}:${screenId}`));
+    if (!source.success || source.data.root !== live.realRoot || source.data.hash !== config.overview.sourceHash)
+      throw new ScreenContextError('overview_source_unverified', 'Связь обзора с выбранной папкой не подтверждена. Попроси партнёра создать новый обзор.');
+    const current = await importScaffold(live.realRoot, { companyName: config.companyName,
+      limits: { maxDepth: config.overview.maxDepth }, allowDepthBoundary: true, signal: active });
+    if (current.snapshot.hash !== source.data.hash)
+      throw new ScreenContextError('overview_source_changed', 'Папка изменилась после снимка. Попроси партнёра создать новый обзор.');
+  }
   async function bind(threadId: string, screenId: string, active = requestSignal(), companyId?: string) {
     const live = await native.resolve(threadId, active, companyId);
     const port = createScreenBackend({ binding: { ...live.context, screen_id: screenId },
@@ -128,6 +148,7 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
       callMcp: (request, call) => options.account.callMcpForContext(request, { ...call.expectedContext, epoch: live.epoch }, call.signal) });
     try {
       const snapshot = await port.get(active); // Shared /mcp must authorize the actual company and screen first.
+      await verifyOverviewSource(snapshot, live, screenId, active);
       if (JSON.stringify(await native.resolve(threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
       await bb.storage.kv.set(bindingKey(threadId), { schema: 1, screen_id: screenId, context: live.context, real_root: live.realRoot });
       if (JSON.stringify(await native.resolve(threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
@@ -139,7 +160,64 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
           : 'Screen подготовлен, но открытие вкладки BB не подтверждено. Не утверждай, что пользователь её видит; попроси открыть «Конструктор» в этом разговоре.' };
     } finally { port.dispose(); }
   }
+  async function openScreen(threadId: string, screenId: string, companyId: string | undefined, create: { requestId: string; companyName: string; onlyIfEmpty?: boolean } | undefined, active: AbortSignal) {
+    const live = await native.resolve(threadId, active, companyId);
+    const result = await options.account.callMcpForContext({ name: 'screen_open', arguments: {
+      id: screenId, preset: 'space-setup', company_id: live.context.company_id, ...(create ? { create } : {}),
+    } }, { ...live.context, epoch: live.epoch }, active);
+    const parsed = z.object({ isError: z.boolean().optional(), structuredContent: z.unknown() }).passthrough().parse(result);
+    if (parsed.isError) {
+      const reason = z.object({ reason: z.string() }).safeParse(parsed.structuredContent);
+      throw new ScreenTransportError(reason.success ? reason.data.reason : 'mcp_error');
+    }
+    const after = await native.resolve(threadId, active);
+    if (JSON.stringify(after) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
+    return bind(threadId, screenId, active);
+  }
+  async function hasExistingContent(root: string): Promise<boolean> {
+    const entries = await readdir(root, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name !== '.svaib' || !entry.isDirectory() || entry.isSymbolicLink()) return true;
+      const metadata = await readdir(`${root}/.svaib`, { withFileTypes: true });
+      if (metadata.some(item => item.name !== 'platform.json' || !item.isFile() || item.isSymbolicLink())) return true;
+    }
+    return false;
+  }
   bb.rpc.register(screenRpcContract, {
+    'screen.openCompany': input => respond(async () => {
+      const active = requestSignal();
+      const live = await native.resolve(input.threadId, active, input.companyId);
+      async function remote(name: string, args: Record<string, unknown>) {
+        const raw = await options.account.callMcpForContext({ name, arguments: { ...args, company_id: live.context.company_id } }, { ...live.context, epoch: live.epoch }, active);
+        const envelope = z.object({ isError: z.boolean().optional(), structuredContent: z.unknown() }).passthrough().parse(raw);
+        if (envelope.isError) { const reason = z.object({ reason: z.string() }).safeParse(envelope.structuredContent); throw new ScreenTransportError(reason.success ? reason.data.reason : 'mcp_error'); }
+        if (JSON.stringify(await native.resolve(input.threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
+        return envelope.structuredContent;
+      }
+      const catalog = z.object({ screenDiscoveryVersion: z.literal(1) }).passthrough().safeParse(await remote('screen_catalog', {}));
+      if (!catalog.success) throw new ScreenContextError('screen_discovery_unsupported', 'Сервер ещё не поддерживает поиск конструкторов компании. Обнови серверный Screen; новый экран автоматически не создаётся.');
+      const discoverySchema = z.object({ complete: z.boolean(), screens: z.array(z.object({ id: idSchema, title: z.string().min(1).max(2000), updatedAt: z.string().max(100), kind: z.enum(['overview', 'scaffold']) }).strict()).max(100) }).strict();
+      async function choose(allowCreate: boolean): Promise<Awaited<ReturnType<typeof openScreen>> | { choices: z.infer<typeof discoverySchema>['screens'] }> {
+        const found = discoverySchema.parse(await remote('screen_get', { discover: true }));
+        if (!found.complete) throw new ScreenContextError('screen_discovery_incomplete', 'Список конструкторов получен не полностью; создание и автоматический выбор остановлены.');
+        if (input.screenId) {
+          if (!found.screens.some(item => item.id === input.screenId)) throw new ScreenContextError('screen_choice_stale', 'Выбранный конструктор больше не доступен. Обнови список.');
+          return bind(input.threadId, input.screenId, active, input.companyId);
+        }
+        if (found.screens.length === 1) return bind(input.threadId, found.screens[0].id, active, input.companyId);
+        if (found.screens.length > 1) return { choices: found.screens };
+        if (!allowCreate) throw new ScreenContextError('screen_discovery_changed', 'Список конструкторов изменился. Повтори открытие.');
+        if (await hasExistingContent(live.realRoot)) throw new ScreenContextError('existing_space_requires_overview', 'В папке уже есть материалы. Попроси партнёра показать существующую структуру; новый шаблон не подставляется.');
+        if (JSON.stringify(await native.resolve(input.threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
+        const screenId = 'scaffold-' + createHash('sha256').update(JSON.stringify(['svaib-company-scaffold', input.companyId])).digest('hex');
+        try { return await openScreen(input.threadId, screenId, input.companyId, { requestId: randomUUID(), companyName: input.companyName, onlyIfEmpty: true }, active); }
+        catch (error) {
+          if (error instanceof ScreenTransportError && ['screen_discovery_changed', 'already_exists'].includes(error.code)) return choose(false);
+          throw error;
+        }
+      }
+      return choose(true);
+    }),
     'screen.binding': input => respond(async () => {
       const active = requestSignal();
       const value = await bb.storage.kv.get(bindingKey(input.threadId));
@@ -147,7 +225,9 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
       const parsed = storedBinding.safeParse(value);
       if (!parsed.success) throw new ScreenTransportError('invalid_binding');
       // Read the screen as well: a stale UI binding never becomes authorization.
-      await useBackend({ threadId: input.threadId, screenId: parsed.data.screen_id }, port => port.get(active), active);
+      const snapshot = await useBackend({ threadId: input.threadId, screenId: parsed.data.screen_id }, port => port.get(active), active);
+      const live = await native.resolve(input.threadId, active);
+      await verifyOverviewSource(snapshot, live, parsed.data.screen_id, active);
       return { screenId: parsed.data.screen_id };
     }),
     'screen.get': input => respond(() => useBackend(input, (port, signal) => port.get(signal))),
@@ -180,27 +260,47 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
       JSON.stringify(await respond(() => bind(ctx.threadId, screenId, requestSignal(ctx.signal), companyId))) });
   bb.agents.registerTool({ name: OPEN_TOOL, description: 'Открыть серверный MCP Screen и конструктор каркаса в этом разговоре BB. Использует вход кабинета плагина и подтверждённое членство. При первом вызове до каркаса передай companyId выбранной реальной компании. Подтверждение структуры не создаёт файлы.',
     parameters: selectionSchema.extend({ create: z.object({ requestId: z.string().regex(/^[a-zA-Z0-9-]{1,100}$/), companyName: z.string().min(1).max(2000) }).strict().optional() }).strict(),
-    execute: async ({ screenId, create, companyId }, ctx) => JSON.stringify(await respond(async () => {
+    execute: async ({ screenId, create, companyId }, ctx) => JSON.stringify(await respond(() => openScreen(ctx.threadId, screenId, companyId, create, requestSignal(ctx.signal)))) });
+  bb.agents.registerTool({ name: EXISTING_TOOL, description: 'Показать ограниченный снимок существующей рабочей папки в Screen. Корень берётся только из проверенной среды BB; роли передаются агентом с основанием. Нераскрытые ветки защищены; снимок предназначен для обзора, не для файловых изменений.',
+    parameters: selectionSchema.extend({ requestId: z.string().regex(/^[a-zA-Z0-9-]{1,100}$/), companyName: z.string().min(1).max(100),
+      roles: z.record(z.string().min(1).max(500), z.object({ role: z.enum(['unit', 'aspect', 'kit', 'infrastructure', 'workspace']), source: z.string().min(1).max(800) }).strict()).optional(),
+    }).strict(),
+    execute: async ({ screenId, companyId, requestId, companyName, roles }, ctx) => JSON.stringify(await respond(async () => {
       const active = requestSignal(ctx.signal);
       const live = await native.resolve(ctx.threadId, active, companyId);
-      const result = await options.account.callMcpForContext({ name: 'screen_open', arguments: {
-        id: screenId, preset: 'space-setup', company_id: live.context.company_id, ...(create ? { create } : {}),
+      const capabilities = await options.account.callMcpForContext({ name: 'screen_catalog', arguments: { company_id: live.context.company_id } },
+        { ...live.context, epoch: live.epoch }, active);
+      const catalog = z.object({ isError: z.boolean().optional(), structuredContent: z.object({ overviewVersion: z.literal(1) }).passthrough() }).passthrough().safeParse(capabilities);
+      if (!catalog.success || catalog.data.isError)
+        throw new ScreenContextError('overview_unsupported', 'Сервер ещё не поддерживает безопасный обзор существующего пространства. Обнови серверный Screen; шаблон нового пространства не подставляется.');
+      if (JSON.stringify(await native.resolve(ctx.threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
+      const imported = await importScaffold(live.realRoot, { companyName, roles, limits: { maxDepth: 1 }, allowDepthBoundary: true, signal: active });
+      await verifyScaffoldSnapshot(live.realRoot, imported.snapshot, active);
+      if (JSON.stringify(await native.resolve(ctx.threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
+      const document = { schemaVersion: 1, title: 'Существующее пространство — обзор',
+        description: 'Снимок первых двух уровней. Закрытые ветки и приватные данные не раскрыты; перед изменениями необходим полный разбор.', layout: 'stack',
+        blocks: [{ id: 'space-setup', type: 'scaffold', version: 1, title: 'Фактические папки и файлы', config: imported.scaffoldConfig }] };
+      const result = await options.account.callMcpForContext({ name: 'screen_create', arguments: {
+        id: screenId, company_id: live.context.company_id, requestId, document,
       } }, { ...live.context, epoch: live.epoch }, active);
-      const parsed = z.object({ isError: z.boolean().optional(), structuredContent: z.unknown() }).passthrough().parse(result);
-      if (parsed.isError) {
-        const reason = z.object({ reason: z.string() }).safeParse(parsed.structuredContent);
+      const envelope = z.object({ isError: z.boolean().optional(), structuredContent: z.unknown() }).passthrough().parse(result);
+      if (envelope.isError) {
+        const reason = z.object({ reason: z.string() }).safeParse(envelope.structuredContent);
         throw new ScreenTransportError(reason.success ? reason.data.reason : 'mcp_error');
       }
-      // A grant/folder change while screen_open was in flight must not bind its response.
-      const after = await native.resolve(ctx.threadId, active);
-      if (JSON.stringify(after) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
-      return bind(ctx.threadId, screenId, active);
+      if (JSON.stringify(await native.resolve(ctx.threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
+      await bb.storage.kv.set(`screen:overview:${live.context.company_id}:${screenId}`, { schema: 1, root: live.realRoot, hash: imported.snapshot.hash });
+      const opened = await bind(ctx.threadId, screenId, active);
+      return { ...opened, coverage: 'limited-overview', hiddenBranches: imported.snapshot.ignoredRoots.length,
+        warning: 'Это частичный обзор, а не план изменения файлов. Нераскрытые ветки сохранены; перед изменениями нужен полный разбор.' };
     })) });
   bb.agents.registerTool({ name: RESULT_TOOL, description: 'Получить с сервера актуальную подтверждённую ревизию и план Screen для штатного space-scaffold. При pending сначала дождись подтверждения структуры. Результат не создаёт файлы и не закрывает этапы онбординга.',
     parameters: z.object({ screenId: idSchema }).strict(), execute: async ({ screenId }, ctx) => JSON.stringify(await respond(async () => {
       const active = requestSignal(ctx.signal);
       await useBackend({ threadId: ctx.threadId, screenId }, port => port.get(active), active);
       const live = await native.resolve(ctx.threadId, active);
+      if (await bb.storage.kv.get(`screen:overview:${live.context.company_id}:${screenId}`))
+        throw new ScreenContextError('overview_not_applyable', 'Это ограниченный обзор существующего дерева. Он не является планом файловых изменений; нужен полный разбор.');
       const result = await options.account.callMcpForContext({ name: 'screen_result', arguments: { id: screenId, company_id: live.context.company_id } }, { ...live.context, epoch: live.epoch }, active);
       const envelope = z.object({ isError: z.boolean().optional(), structuredContent: z.unknown() }).passthrough().parse(result);
       if (envelope.isError) {
@@ -215,6 +315,29 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
       const after = await native.resolve(ctx.threadId, active);
       if (JSON.stringify(after) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
       return parsed.data;
+    })) });
+  bb.agents.registerTool({ name: OVERVIEW_TOOL, description: 'Прочитать сохранённое дерево ограниченного обзора и его границы для обсуждения. Результат не является планом файловых изменений.',
+    parameters: z.object({ screenId: idSchema }).strict(), execute: async ({ screenId }, ctx) => JSON.stringify(await respond(async () => {
+      const active = requestSignal(ctx.signal);
+      const snapshot = await useBackend({ threadId: ctx.threadId, screenId }, port => port.get(active), active);
+      const blocks = snapshot.screen.document.blocks;
+      if (blocks.length !== 1 || blocks[0].type !== 'scaffold' || blocks[0].config.schemaVersion !== 2 || !blocks[0].config.overview)
+        throw new ScreenContextError('not_overview', 'Этот Screen не является ограниченным обзором.');
+      const live = await native.resolve(ctx.threadId, active);
+      const stored = z.object({ schema: z.literal(1), root: z.string(), hash: z.string() }).strict().safeParse(
+        await bb.storage.kv.get(`screen:overview:${live.context.company_id}:${screenId}`));
+      let source: 'matches' | 'changed' | 'unverified' = 'unverified';
+      if (stored.success && stored.data.root === live.realRoot && stored.data.hash === blocks[0].config.overview.sourceHash) {
+        const current = await importScaffold(live.realRoot, { companyName: blocks[0].config.companyName,
+          limits: { maxDepth: blocks[0].config.overview.maxDepth }, allowDepthBoundary: true, signal: active });
+        source = current.snapshot.hash === stored.data.hash ? 'matches' : 'changed';
+      }
+      if (JSON.stringify(await native.resolve(ctx.threadId, active)) !== JSON.stringify(live)) throw new ScreenTransportError('context_changed');
+      return { screenId, revision: snapshot.screen.revision, cursor: snapshot.cursor,
+        config: blocks[0].config, status: 'overview-only', source,
+        warning: source === 'matches' ? 'Исходный снимок соответствует рабочей папке в пределах его границ; изменения дерева выражают намерение, перед файловыми действиями нужен полный разбор.'
+          : source === 'changed' ? 'Рабочая папка изменилась после снимка; повторите обзор перед выводами о текущем состоянии.'
+            : 'Связь обзора с текущей папкой не подтверждена. Не выдавайте его за текущую структуру; сделайте новый обзор.' };
     })) });
   bb.agents.registerTool({ name: PREVIOUS_TOOL, description: 'После явного выбора компании и постоянной папки найди ранее открытые доступные Screen этой компании, даже если прежний разговор удалён. Не читает переписку, не выбирает компанию или экран и не переносит прежнюю папку. При нескольких вариантах спроси человека; затем открой выбранный через svaib_screen_bind.',
     parameters: z.object({ companyId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/) }).strict(),
@@ -248,8 +371,8 @@ export function registerScreenModule(bb: BbPluginApi, options: { account: Screen
   bb.events.on('thread.deleted', ({ thread }) => { for (const [key, poll] of polls) if (key.startsWith(thread.id + ':')) poll.abort(); });
   return {
     configure(_context: PluginAgentConfigurationContext): PluginAgentConfiguration {
-      return { tools: [OPEN_TOOL, BIND_TOOL, RESULT_TOOL, PREVIOUS_TOOL, FOLDER_TOOL], skills: [], instructions:
-        'Продолжи svaib:onboarding с текущего account setup. До Screen человек выбирает реальную компанию и постоянную папку через штатный новый разговор BB: No project → New project или существующий проект, затем оставляет Project checkout; personal и управляемые временные среды не подходят, Git не нужен. Когда человек отправил подготовленное продолжение после такого выбора, вызови svaib_choose_folder без пути: инструмент проверит фактическую среду текущего разговора, сохранит прежнее поручение и откроет проверку продолжения. Если постоянной папки нет, не создавай файлы и помоги открыть новый разговор со стандартным выбором папки BB. Не выбирай папку за человека. Для прежнего Screen после выбора компании вызови svaib_screen_previous, предложи продолжить и уточни выбор, если их несколько. Открой через svaib_screen_open/bind; передай companyId, если привязки ещё нет. Прежняя папка и права не переносятся. Не утверждай, что вкладка открыта, при presentation=not-opened: предложи кнопку «Конструктор» в разговоре. После подтверждения получи svaib_screen_result и продолжи через space-scaffold с необходимыми согласиями и проверкой файлов. Pending не разрешает создавать файлы; Screen не разрешает затирать чужое. Не выдумывай компанию и не записывай credentials.' };
+      return { tools: [OPEN_TOOL, EXISTING_TOOL, OVERVIEW_TOOL, BIND_TOOL, RESULT_TOOL, PREVIOUS_TOOL], skills: [], instructions:
+        'Продолжи svaib:onboarding в текущем разговоре. Для Screen используй выбранную человеком компанию и текущую постоянную папку проекта BB: вызови svaib_screen_open с companyId или svaib_screen_bind для выбранного прежнего Screen. Инструмент сам проверит среду и доступ; не запускай новое подключение и не вызывай svaib_choose_folder, если текущая папка подходит. Если инструмент сообщает, что нужна постоянная папка, помоги человеку выбрать проект или папку штатными средствами BB; не выбирай её за человека. Для прежнего Screen вызови svaib_screen_previous и уточни выбор, если их несколько. Не утверждай, что вкладка открыта, при presentation=not-opened: предложи кнопку «Конструктор» в разговоре. После подтверждения получи svaib_screen_result и продолжи через space-scaffold с необходимыми согласиями и проверкой файлов. Pending не разрешает создавать файлы; Screen не разрешает затирать чужое. Не выдумывай компанию и не записывай credentials.' };
     }, dispose,
   };
 }

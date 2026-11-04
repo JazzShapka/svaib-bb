@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-svaib-workplace",
-  "version": "0.3.14",
+  "version": "0.3.16",
   "type": "module",
   "engines": {
     "bb": ">=0.48.1",

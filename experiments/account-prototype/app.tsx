@@ -1,58 +1,63 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useBbNavigate, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useBbContext, useBbNavigate, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './account-module';
-import { accountIdentity, hasCompanyMembership, type AccountView } from './contracts';
+import type { screenRpcContract } from '../../screen-module';
+import { accountIdentity, hasCompanyMembership, type AccountView, type OnboardingView } from './contracts';
 import type { PluginNavPanelProps } from '@get-bb/plugin-sdk/app';
-import { useBbContext } from '@get-bb/plugin-sdk/app';
 import type { ConnectFlowView } from './connect-flow';
-import type { journeyContract, JourneyStatus } from './journey-status';
-import { OnboardingJourney, type SetupStep } from './OnboardingJourney';
+import catalog from './onboarding-catalog.json';
 import { PartnerSetup } from './PartnerSetup';
-import { COMPANY_FOLDER_PROMPT } from './folder-contract';
 import './app.css';
+import './onboarding-journey.css';
 
-const signedOut: AccountView = { state: 'signed-out', message: '', me: null, profile: null, canEdit: false };
-function journeyIdentity(account: AccountView, context: { projectId: string | null; threadId: string | null }) {
-  return [account.me ? accountIdentity(account.me) : 'signed-out', account.me?.tenant_id ?? '', context.projectId ?? '', context.threadId ?? ''].join(':');
-}
+const progressCache = new Map<string, OnboardingView>();
 
 export function AccountPage({ production = false }: { production?: boolean } = {}) {
-  const context = useBbContext();
   const rpc = useRpc<typeof rpcContract>();
+  const screenRpc = useRpc<typeof screenRpcContract>();
+  const context = useBbContext();
   const navigate = useBbNavigate();
-  const journeyRpc = useRpc<typeof journeyContract>();
   const [view, setView] = useState<AccountView | null>(null);
-  const [accountView, setAccountView] = useState<AccountView>(signedOut);
   const [connection, setConnection] = useState<ConnectFlowView | null>(null);
   const [comparison, setComparison] = useState<'unknown' | 'match' | 'mismatch'>('unknown');
   const [nativeHost, setNativeHost] = useState<string | null>(null);
-  const [journey, setJourney] = useState<JourneyStatus | null>(null);
-  const [journeyKey, setJourneyKey] = useState('');
+  const [progress, setProgress] = useState<OnboardingView | null>(null);
+  const [selectionLoaded, setSelectionLoaded] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [companyId, setCompanyId] = useState('');
+  const [screenChoices, setScreenChoices] = useState<{ companyId: string; items: { id: string; title: string; updatedAt: string; kind: 'overview' | 'scaffold' }[] } | null>(null);
+  const selectedCompany = useRef(companyId); selectedCompany.current = companyId;
   const [companies, setCompanies] = useState<NonNullable<NonNullable<AccountView['me']>['companies']>>([]);
   const sequence = useRef(0);
+  const currentAccount = useRef<string | null | undefined>(undefined);
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
     try {
-      const progressRequest = journeyRpc.call('journeyStatus', { projectId: context.projectId ?? null, threadId: context.threadId ?? null }).catch(() => null);
       const [account, flow, native] = await Promise.all([rpc.call('status', null), rpc.call('connectionStatus').catch(() => null),
         rpc.call('compareNativeAccount').catch(() => ({ status: 'unknown' as const, observedAt: null, hostId: null }))]);
+      if (request !== sequence.current) return;
+      const identity = account.state === 'connected' ? account.me?.account_id ?? null : null;
+      if (identity !== currentAccount.current) {
+        setProgress(null); setSelectionLoaded(false);
+        const saved = identity ? await rpc.call('selectedCompany').catch(() => ({ company_id: null })) : { company_id: null };
+        if (request !== sequence.current) return;
+        currentAccount.current = identity;
+        const next = saved.company_id ?? '';
+        setSelectionLoaded(true);
+        if (next !== companyId) { setCompanyId(next); return; }
+      }
       const selected = companyId ? await rpc.call('status', { company_id: companyId }) : account;
       if (request !== sequence.current) return;
-      const nextJourneyKey = journeyIdentity(account, context);
-      if (nextJourneyKey !== journeyKey) { setJourney(null); setJourneyKey(nextJourneyKey); }
-      setAccountView(account);
       setComparison(native.status);
       setNativeHost(native.hostId);
       setCompanies(account.me?.companies ?? []);
-      void progressRequest.then(progress => {
-        if (request !== sequence.current) return;
-        if (progress) setJourney(progress);
-        else setJourney(current => current ?? { workplace: false, account: account.state === 'connected', space: false, firstWork: false,
-          nextStep: null, nextStages: [], stagesAvailable: false });
-      });
+      const progressKey = `${identity ?? 'signed-out'}:${companyId}`;
+      const cached = identity ? progressCache.get(progressKey) : undefined;
+      if (cached) setProgress(cached);
+      void rpc.call('onboardingProgress', { company_id: companyId || null }).then(value => {
+        if (request === sequence.current) { if (identity && value.status === 'available') { progressCache.set(progressKey, value); if (progressCache.size > 20) progressCache.delete(progressCache.keys().next().value!); } setProgress(value); }
+      }).catch(() => { if (request === sequence.current) setProgress({ status: 'unavailable', onboarding: null, nextStep: null, role: null }); });
       if (companyId && (!account.me || !selected.me || selected.state !== 'connected' ||
           accountIdentity(account.me) !== accountIdentity(selected.me) || !hasCompanyMembership(selected.me) ||
           selected.me.tenant_id !== companyId)) {
@@ -60,13 +65,16 @@ export function AccountPage({ production = false }: { production?: boolean } = {
         setError('Компания недоступна в этом подключении. Выбери доступную компанию и повтори.');
         return;
       }
-      setView(selected); setConnection(flow); setError(flow ? '' : 'Не удалось загрузить статус настройки. Обнови страницу или начни обычный разговор в BB.');
+      setView(selected.me && !selected.me.display_name && account.me?.display_name
+        ? { ...selected, me: { ...selected.me, display_name: account.me.display_name } } : selected);
+      setConnection(flow); setError(flow ? '' : 'Не удалось загрузить статус настройки. Обнови страницу или начни обычный разговор в BB.');
     }
-    catch { if (request === sequence.current) { setView(null); setCompanies([]); setError('Не удалось загрузить подключение. Повтори обновление.'); } }
-  }, [rpc, journeyRpc, companyId, context.projectId, context.threadId, journeyKey]);
+    catch { if (request === sequence.current) { setView(null); setCompanies([]); setSelectionLoaded(true); setProgress({ status: 'unavailable', onboarding: null, nextStep: null, role: null }); setError('Не удалось загрузить подключение. Повтори обновление.'); } }
+  }, [rpc, companyId]);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => () => { sequence.current++; }, []);
-  useRealtime('account-changed', () => { void refresh(); });
+  useRealtime('account-changed', () => { setProgress(null); setScreenChoices(null); setSelectionLoaded(false); currentAccount.current = undefined; void refresh(); });
+  useEffect(() => { setScreenChoices(null); }, [companyId]);
   // Account marks can also change outside BB, e.g. in Telegram. Re-read when
   // the person returns to this window, without background polling.
   useEffect(() => {
@@ -86,31 +94,49 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     catch (e) { setError(e instanceof Error ? e.message : 'Действие не завершено. Повтори обновление.'); }
     finally { setBusy(false); }
   }
-  async function continueJourney(stepId: string) {
-    if (!journey || journeyKey !== journeyIdentity(accountView, context)) return;
-    if (stepId === 'space') {
-      const hostId = nativeHost ?? connection?.binding?.hostId;
-      if (!hostId) throw new Error('Сначала открой партнёра в BB.');
-      navigate.toCompose({ hostId, initialPrompt: COMPANY_FOLDER_PROMPT, focusPrompt: false });
-      return;
-    }
-    await rpc.call('continueOnboarding', { projectId: context.projectId ?? null, threadId: context.threadId ?? null, stepId });
+  function continueJourney(stageTitle?: string) {
+    const company = companies.find(item => item.company_id === companyId);
+    const choice = company ? ` Моя компания: ${company.company_name || company.tenant_name || (view?.me?.tenant_id === company.company_id && view.me.tenant_name) || company.company_id} (ID: ${company.company_id}).` : '';
+    const stage = stageTitle ? ` Хочу продолжить: «${stageTitle}».` : '';
+    navigate.toCompose({ initialPrompt: `Помоги продолжить настройку svaib.${stage}${choice} Продолжим в папке текущего проекта.`, focusPrompt: false });
   }
-  const done = [!!journey?.workplace, !!journey?.account, !!journey?.space, !!journey?.firstWork];
-  const setupComplete = done.every(Boolean);
-  const activeStep = done.findIndex(value => !value);
-  const setup: SetupStep[] = [
-    { id: 'workplace', title: 'Подготовить партнёра', detail: 'Проверим рабочее место и доступ партнёра.', state: 'upcoming' },
-    { id: 'account', title: 'Войти в svaib', detail: 'Подключим твой аккаунт.', state: 'upcoming' },
-    { id: 'space', title: 'Подключить компанию и пространство', detail: 'В новом разговоре BB выберем постоянную папку для материалов компании.', state: 'upcoming' },
-    { id: 'first-work', title: 'Познакомиться и начать работу', detail: 'Расскажешь партнёру о себе и перейдёшь к первой задаче.', state: 'upcoming' },
-  ].map((step, index) => ({ ...step, state: done[index] ? 'done' : index === activeStep ? 'current' : 'upcoming' }));
+  async function openConstructor(screenId?: string) {
+    if (!companyId) return;
+    if (!context.threadId) throw new Error('Открой разговор в проекте BB и повтори открытие конструктора.');
+    const selected = companyId;
+    const name = view?.me?.tenant_name || companyId;
+    const result = await screenRpc.call('screen.openCompany', { threadId: context.threadId, companyId, companyName: name, ...(screenId ? { screenId } : {}) });
+    if (selectedCompany.current !== selected) return;
+    if (!result.ok) throw new Error(result.error.message);
+    if ('choices' in result.value) { setScreenChoices({ companyId: selected, items: result.value.choices }); return; }
+    setScreenChoices(null);
+    if (result.value.presentation !== 'tab-opened') setError('Конструктор подготовлен. Открой вкладку «Конструктор» в текущем разговоре.');
+  }
+  const marks = progress?.status === 'available' ? progress.onboarding.marks : {};
+  const audience = progress?.status === 'available' ? progress.onboarding.audience || (progress.role === 'owner' ? 'ceo' : progress.role === 'member' ? 'employee' : null) : null;
+  const stages = catalog.stages.filter(stage => stage.track === 'user' && stage.active && (stage.kind === 'base' ||
+    (stage.kind === 'tool' && progress?.status === 'available' && progress.onboarding.tools.includes(stage.id))) &&
+    (!stage.audiences.length || (!!audience && (stage.audiences as string[]).includes(audience))) && marks[stage.id]?.state !== 'skip').sort((a, b) => a.order - b.order);
+  const completed = (stage: typeof stages[number]) => marks[stage.id]?.state === 'done' || (!marks[stage.id] && stage.replaces.some(id => marks[id]?.state === 'done'));
+  const first = stages.find(stage => !completed(stage));
   return <div className="svaib-account-viewport"><main className="svaib-account">
     <header><span className="svaib-account-mark">s.</span><div><p className="svaib-account-eyebrow">{production ? 'svaib' : 'Тестовый контур · Staging'}</p><h1>Моё рабочее место</h1></div></header>
     <p className="svaib-account-note">{production ? 'Работа с партнёром и твоими компаниями.' : 'Прототип для локального BB. Одно подключение svaib на весь BB-сервер; оно доступно всем его окнам.'}</p>
-    {journey && <OnboardingJourney setup={setup} setupComplete={setupComplete} nextSteps={journey.nextStages} stagesAvailable={journey.stagesAvailable} busy={busy}
-      onContinue={stepId => { void act(() => continueJourney(stepId)); }} />}
-    {!journey && <section><p role="status">Проверяю текущий шаг…</p></section>}
+    <section className="svaib-journey"><h2>Твой путь</h2>
+      {view?.state === 'signed-out' ? <><p>Войди в svaib, чтобы продолжить настройку и выбрать компанию.</p>
+        <button className="svaib-journey-action" disabled={busy} onClick={() => void act(async () => { await rpc.call('startCabinetLogin'); await refresh(); })}>Войти в svaib</button></> :
+      view?.state === 'waiting' ? <p role="status">Заверши вход в открывшемся браузере.</p> :
+      !selectionLoaded || !progress ? <p role="status">Проверяю этапы…</p> : progress.status === 'unavailable' ?
+        <p role="status">Не удалось загрузить этапы. Можно продолжить работу с партнёром.</p> :
+        <ol className="svaib-journey-list">{stages.map((stage, index) => {
+          const mark = marks[stage.id]?.state;
+          const done = completed(stage);
+          return <li key={stage.id} className={`svaib-journey-step ${done ? 'svaib-journey-step--done' : stage === first ? 'svaib-journey-step--current' : ''}`}>
+            <span className="svaib-journey-number">{done ? '✓' : index + 1}</span><div className="svaib-journey-copy"><div className="svaib-journey-step-header"><h3>{stage.title}</h3><span className="svaib-journey-status">{done ? 'Готово' : mark === 'waiting' ? 'Ожидает' : mark === 'deferred' ? 'Отложено' : mark === 'unverified' ? 'Не проверено' : stage === first ? 'Сейчас' : 'Предстоит'}</span></div>
+            {!done && stage === first && <button type="button" className="svaib-journey-action" disabled={busy} onClick={() => continueJourney(stage.title)}>Продолжить</button>}</div></li>;
+        })}</ol>}
+      {view?.state !== 'signed-out' && view?.state !== 'waiting' && selectionLoaded && progress?.status === 'unavailable' && <button type="button" className="svaib-journey-action" onClick={() => continueJourney()}>Продолжить</button>}
+    </section>
     {error && <p role="alert" className="svaib-account-error">{error}</p>}
     {!view ? !error && <p role="status">Проверяю подключение…</p> : <>
       {view.message && <p role="status">{view.message}</p>}
@@ -121,14 +147,20 @@ export function AccountPage({ production = false }: { production?: boolean } = {
       {view.me && <section><p className="svaib-account-eyebrow">Аккаунт svaib</p><h2>{view.me.display_name || view.me.subject_id}</h2>
         {comparison === 'match' && <p role="status">Последний вход партнёра и кабинет: один аккаунт.</p>}
         {comparison === 'mismatch' && <p role="alert">В кабинете и у партнёра разные аккаунты. Чтобы сверить их, войди в нужный аккаунт.</p>}
-        {companies.length > 0 && <label className="svaib-account-company">Компания для просмотра<select value={companyId} disabled={busy} onChange={event => setCompanyId(event.currentTarget.value)}>
+        {companies.length > 0 && <label className="svaib-account-company">Компания<select value={companyId} disabled={busy} onChange={event => { const next = event.currentTarget.value; void act(async () => { await rpc.call('selectCompany', { company_id: next || null }); setProgress(null); setCompanyId(next); }); }}>
           <option value="">Аккаунт без выбранной компании</option>
-          {companies.map(company => <option key={company.company_id} value={company.company_id}>{company.company_name || company.tenant_name || company.company_id}</option>)}
+          {companies.map(company => <option key={company.company_id} value={company.company_id}>{company.company_name || company.tenant_name || (view.me?.tenant_id === company.company_id && view.me.tenant_name) || company.company_id}</option>)}
         </select></label>}
         {hasCompanyMembership(view.me)
           ? <p>{view.me.tenant_name || view.me.tenant_id} · {view.me.role === 'owner' ? 'Владелец' : 'Участник'}</p>
           : <p>Компания ещё не выбрана.</p>}
-        {companies.length > 0 && <p className="svaib-account-note">Выбор здесь показывает настройки компании. Рабочий чат сохраняет свою компанию; для другой начни новый разговор с партнёром.</p>}
+        {companyId && hasCompanyMembership(view.me) && <><button type="button" className="svaib-account-button" disabled={busy} onClick={() => void act(() => openConstructor())}>Открыть конструктор пространства</button>
+          <p className="svaib-account-note">Конструктор показывает проект каркаса; содержимое папки автоматически не считывается.</p>
+          {screenChoices?.companyId === companyId && <div role="group" aria-label="Выбери конструктор"><p>Найдено несколько конструкторов. Выбери нужный:</p>
+            {screenChoices.items.map((item, index) => <button key={item.id} type="button" className="svaib-account-button" disabled={busy}
+              onClick={() => void act(() => openConstructor(item.id))}>{item.title} · {item.kind === 'overview' ? 'обзор' : 'каркас'} · {item.updatedAt.replace('T', ' ').slice(0, 16)} · {index + 1}</button>)}
+          </div>}</>}
+        {companies.length > 0 && <p className="svaib-account-note">Компания определяет отображаемый путь. Привязка рабочей папки проверяется отдельно.</p>}
       </section>}
       {view.profile && <section><h2>Мой интерфейс</h2>
         <label className="svaib-account-toggle"><input type="checkbox" checked={view.profile.features.workspace_card} disabled={busy || !view.canEdit}

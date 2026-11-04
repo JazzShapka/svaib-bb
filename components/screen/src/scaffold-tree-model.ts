@@ -9,7 +9,9 @@ export const treeItemSchema = z.object({
   locked: z.boolean(), fixedName: z.boolean(), placeholder: z.boolean(), proposed: z.boolean(), acceptsBlocks: z.boolean(), projectContainer: z.boolean(), clientContainer: z.boolean(),
   template: z.string().nullable(), screenKind: z.string().max(30).nullable(),
 }).strict();
-export const treeConfigSchema = z.object({ schemaVersion: z.literal(2), catalogVersion: z.string(), canonSnapshot: z.string(), companyName: z.string().min(1).max(100), tree: z.array(treeItemSchema).min(1).max(700) }).strict().superRefine((config, ctx) => {
+export const treeConfigSchema = z.object({ schemaVersion: z.literal(2), catalogVersion: z.string(), canonSnapshot: z.string(), companyName: z.string().min(1).max(100),
+  overview: z.object({ sourceHash: z.string().regex(/^[0-9a-f]{64}$/), maxDepth: z.number().int().positive(), omittedBranches: z.number().int().nonnegative(), omittedItems: z.number().int().nonnegative(), reservedPaths: z.array(z.string().min(1).max(2000)).max(600) }).strict().optional(),
+  tree: z.array(treeItemSchema).min(1).max(700) }).strict().superRefine((config, ctx) => {
   const issue = (message: string) => ctx.addIssue({ code: 'custom', message });
   if (config.catalogVersion !== manifest.version || config.canonSnapshot !== manifest.canonSnapshot) issue('Каталог изменился; нужна сверка с установленной поставкой.');
   const nodes = new Map(config.tree.map(item => [item.id, item]));
@@ -27,10 +29,42 @@ export const treeConfigSchema = z.object({ schemaVersion: z.literal(2), catalogV
     const seen = new Set([node.id]); let cursor = parent;
     while (cursor) { if (seen.has(cursor.id)) { issue('Цикл в дереве.'); break; } seen.add(cursor.id); cursor = cursor.parentId ? nodes.get(cursor.parentId) : null; }
   }
+  if (config.overview) for (const node of config.tree.filter(item => item.parentId)) {
+    const segments = []; let cursor: TreeItem | undefined = node; const visited = new Set<string>();
+    while (cursor?.parentId && !visited.has(cursor.id)) { visited.add(cursor.id); segments.unshift(cursor.name); cursor = nodes.get(cursor.parentId); }
+    const path = segments.join('/');
+    if (config.overview.reservedPaths.some(reserved => path === reserved || path.startsWith(reserved + '/'))) issue('Скрытый путь нельзя заменять видимым элементом.');
+  }
 });
 export type TreeConfig = z.infer<typeof treeConfigSchema>;
 export type TreeItem = z.infer<typeof treeItemSchema>;
+export function checkOverviewUpdate(previous: TreeConfig, updated: TreeConfig) {
+  if (!previous.overview && !updated.overview) return;
+  if (!previous.overview || !updated.overview || JSON.stringify(previous.overview) !== JSON.stringify(updated.overview)) throw new Error('overview_immutable');
+  const locked = (config: TreeConfig) => {
+    const nodes = new Map(config.tree.map(node => [node.id, node]));
+    const result = new Map<string, string>();
+    for (const node of config.tree.filter(item => item.locked)) {
+      let cursor = node; const path = [];
+      while (cursor.parentId) { path.unshift(cursor.name); cursor = nodes.get(cursor.parentId)!; }
+      result.set(node.id, JSON.stringify({ path: path.join('/'), node }));
+    }
+    return result;
+  };
+  const before = locked(previous), after = locked(updated);
+  for (const [id, value] of before) if (after.get(id) !== value) throw new Error('overview_locked_path');
+  const lockedPaths = [...before.values()].map(value => (JSON.parse(value) as {path:string}).path).filter(Boolean);
+  const underLocked = (config: TreeConfig) => {
+    const nodes = new Map(config.tree.map(node => [node.id, node]));
+    return config.tree.flatMap(node => { let cursor = node; const path = [];
+      while (cursor.parentId) { path.unshift(cursor.name); cursor = nodes.get(cursor.parentId)!; }
+      const full = path.join('/'); return lockedPaths.some(parent => full.startsWith(parent + '/')) ? [JSON.stringify({path:full,node})] : [];
+    }).sort();
+  };
+  if (JSON.stringify(underLocked(previous)) !== JSON.stringify(underLocked(updated))) throw new Error('overview_locked_path');
+}
 export function planTree(config: TreeConfig) {
+  if (config.overview) throw new Error('Ограниченный обзор не является планом файловых изменений.');
   const nodes = new Map(config.tree.map(item => [item.id, item]));
   function path(node: TreeItem): string { const parent = node.parentId ? nodes.get(node.parentId)! : null; return parent ? [path(parent), node.name].filter(Boolean).join('/') : ''; }
   const files = config.tree.filter(item => item.parentId && item.type === 'file').map(item => ({ path: path(item), template: item.template,

@@ -4,7 +4,7 @@ import { BarChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
 import { SVGRenderer } from 'echarts/renderers';
 import type { Block, Screen } from '../src/model';
-import { ScaffoldEditor } from './ScaffoldEditor';
+import { ScaffoldEditor, clearScaffoldDrafts } from './ScaffoldEditor';
 import './screen.css';
 
 echarts.use([BarChart, GridComponent, TooltipComponent, LegendComponent, SVGRenderer]);
@@ -46,12 +46,13 @@ export type ScreenTransport = {
   submit(input: { id: string; requestId: string; expectedRevision: number; selectedIds: string[] }): Promise<{ screen: Screen }>;
   update?(input: { id: string; requestId: string; expectedRevision: number; document: Screen['document'] }): Promise<{ screen: Screen }>;
   confirmScaffold?(input: { id: string; requestId: string; expectedRevision: number; blockId: string }): Promise<{ screen: Screen }>;
+  registerDrain?(drain: () => Promise<void>): () => void;
   subscribe?(invalidate: () => void): () => void;
 };
 
 const snapshots = new Map<string, Screen>();
 const SNAPSHOT_LIMIT = 20;
-export function clearScreenSnapshots() { snapshots.clear(); }
+export function clearScreenSnapshots() { snapshots.clear(); clearScaffoldDrafts(); }
 function rememberSnapshot(key: string | undefined, screen: Screen) {
   if (!key) return;
   snapshots.delete(key); snapshots.set(key, screen);
@@ -111,7 +112,7 @@ function ScreenContent({ transport, invalidate = 0, cacheKey }: { transport: Scr
   if (!screen) return <section className="sv-screen"><p role="status">{error || 'Открываю экран…'}</p>{error && <button onClick={() => void load()}>Повторить</button>}</section>;
   const onlyBlock = screen.document.blocks.length === 1 ? screen.document.blocks[0] : null;
   if (onlyBlock?.type === 'scaffold') return <main data-screen-id={screen.id} data-revision={screen.revision}>
-    <ScaffoldEditor block={onlyBlock} screen={screen} transport={transport} receive={receive} />
+    <ScaffoldEditor block={onlyBlock} screen={screen} transport={transport} receive={receive} cacheKey={cacheKey && `${cacheKey}:${onlyBlock.id}`} />
   </main>;
   return <main className="sv-screen" data-screen-id={screen.id} data-revision={screen.revision}>
     <header className="screen-header"><div><span className="screen-eyebrow">svaib · Screen · локальный пилот</span><h1>{screen.document.title}</h1><p>{screen.document.description}</p></div>
@@ -122,7 +123,7 @@ function ScreenContent({ transport, invalidate = 0, cacheKey }: { transport: Scr
     <div className={`screen-blocks screen-${screen.document.layout}`}>
       {screen.document.blocks.map(block => <section key={block.id} className={`screen-card screen-block-${block.type}`} data-block-id={block.id}><h2>{block.title}</h2>
         {block.type === 'note' ? <p className="screen-note-text">{block.text}</p> : block.type === 'chart' ? <Chart block={block} /> : block.type === 'scaffold' ?
-          <ScaffoldEditor block={block} screen={screen} transport={transport} receive={receive} /> :
+          <ScaffoldEditor block={block} screen={screen} transport={transport} receive={receive} cacheKey={cacheKey && `${cacheKey}:${block.id}`} /> :
           <ul className="screen-tasks">{block.items.filter(task => filter === 'all' || task.owner === filter).map(task => <li key={task.id}>
             <label><input type="checkbox" aria-label={`Выбрать: ${task.title}`} checked={selected.has(task.id)} onChange={() => setSelected(previous => { const next = new Set(previous); next.has(task.id) ? next.delete(task.id) : next.add(task.id); return next; })} />
               <span><strong>{task.title}</strong><small>{task.owner} · {({ active: 'В работе', backlog: 'Отложено', done: 'Сделано' })[task.status]}</small><small className="screen-source">{task.source.title}<br /><code>{task.source.ref}</code></small></span></label>

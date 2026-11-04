@@ -17,13 +17,18 @@ import { HOOK_TOOL } from './hook-bundle';
 import { FOLDER_TOOL } from './folder-contract';
 import { createCompanyFolderFlow } from './company-folder-flow';
 import { comparisonSchema, createNativeObservation, nativeObservationInputSchema } from './native-observation';
+import { onboardingViewSchema } from './contracts';
 
 export const rpcContract = defineRpcContract({
   observeNativeAccount: { input: nativeObservationInputSchema, output: z.object({ recorded: z.literal(true) }).strict() },
   compareNativeAccount: { input: z.null(), output: comparisonSchema },
+  onboardingProgress: { input: z.object({ company_id: z.string().min(1).max(64).nullable() }).strict(), output: onboardingViewSchema },
+  selectedCompany: { input: z.null(), output: z.object({ company_id: z.string().nullable() }).strict() },
+  selectCompany: { input: z.object({ company_id: z.string().min(1).max(64).nullable() }).strict(), output: z.null() },
   status: { input: z.object({ company_id: z.string().min(1).max(64) }).strict().nullable(), output: accountViewSchema },
   connectionThread: { input: z.object({ threadId: z.string().regex(/^thr_[a-z0-9]+$/) }).strict(), output: connectionThreadSchema },
   beginLogin: { input: z.null(), output: z.object({ authorizationUrl: z.string().url() }).strict() },
+  startCabinetLogin: { input: z.null(), output: z.null() },
   connect: { input: startFlowSchema, output: flowSchema },
   continueOnboarding: { input: onboardingActionSchema, output: onboardingActionResultSchema },
   connectionStatus: { input: z.null(), output: flowSchema },
@@ -126,6 +131,22 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   const configure = (context: PluginAgentConfigurationContext) => connectionConfiguration(context, bb.pluginId);
   if (options.registerConfigure !== false) bb.agents.configure(configure);
   bb.rpc.register(rpcContract, {
+    onboardingProgress: input => input.company_id ? account.companyOnboarding(input.company_id) : account.onboarding(),
+    selectedCompany: async () => {
+      const view = await account.view();
+      const id = view.me?.account_id;
+      if (!id || view.state !== 'connected') return { company_id: null };
+      const saved = await bb.storage.kv.get<string>('cabinet:company:' + id);
+      return { company_id: typeof saved === 'string' && view.me?.companies?.some(c => c.company_id === saved) ? saved : null };
+    },
+    selectCompany: async ({ company_id }) => {
+      const view = await account.view();
+      const id = view.me?.account_id;
+      if (!id || view.state !== 'connected') throw new Error('Войди в аккаунт, чтобы выбрать компанию.');
+      if (company_id && !view.me?.companies?.some(c => c.company_id === company_id)) throw new Error('Компания недоступна этому аккаунту.');
+      await bb.storage.kv.set('cabinet:company:' + id, company_id);
+      return null;
+    },
     observeNativeAccount: input => nativeObservation.record(input),
     compareNativeAccount: () => nativeObservation.compare(),
     connectionThread: async ({ threadId }) => {
@@ -167,6 +188,14 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
     beginLogin: () => {
       if (!endpoints.clientId?.trim() && !endpoints.registration) throw new Error('Сначала укажи OAuth client ID тестового контура в настройках плагина и перезагрузи его.');
       return oauth.begin();
+    },
+    startCabinetLogin: async () => {
+      const { primaryHostId } = await bb.sdk.system.config();
+      if (!primaryHostId) throw new Error('Не удалось найти компьютер для входа.');
+      const { authorizationUrl } = await oauth.begin();
+      try { await browser.call('openLogin', { url: authorizationUrl }, { hostId: primaryHostId }); }
+      catch (error) { oauth.cancel(); throw error; }
+      return null;
     },
     cancelLogin: () => { oauth.cancel(); return null; },
     logout: () => oauth.logout(),

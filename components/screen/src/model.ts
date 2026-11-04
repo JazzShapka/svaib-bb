@@ -27,6 +27,10 @@ export const documentSchema = z.object({
   if (new Set(blockIds).size !== blockIds.length || new Set(taskIds).size !== taskIds.length) {
     ctx.addIssue({ code: 'custom', message: 'ID компонентов и задач должны быть уникальны в экране.' });
   }
+  if (document.blocks.some(block => block.type === 'scaffold' && block.config.schemaVersion === 2 && block.config.overview) &&
+      (document.blocks.length !== 1 || document.blocks[0].type !== 'scaffold')) {
+    ctx.addIssue({ code: 'custom', message: 'Обзор должен быть единственным компонентом экрана.' });
+  }
 });
 export type ScreenDocument = z.infer<typeof documentSchema>;
 export type Block = z.infer<typeof blockSchema>;
@@ -48,6 +52,7 @@ export type EventPage = { events: ScreenEvent[]; cursor: number; screen: Screen;
 
 export const catalog = {
   schemaVersion: 1,
+  overviewVersion: 1,
   components: [
     { type: 'note', version: 1, description: 'Текстовое пояснение' },
     { type: 'tasks', version: 1, description: 'Задачи, локальный фильтр и выбор для передачи агенту' },

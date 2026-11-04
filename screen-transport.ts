@@ -139,6 +139,8 @@ export function createScreenTransport(options: {
 }): ScreenTransport & { dispose(): void } {
   const lifetime = new AbortController();
   const subscriptions = new Set<AbortController>();
+  let drain: (() => Promise<void>) | undefined;
+  let closing = false;
   const backend = options.backend;
   async function request<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
     lifetime.signal.throwIfAborted();
@@ -147,6 +149,11 @@ export function createScreenTransport(options: {
     return result;
   }
   return {
+    registerDrain(callback) {
+      if (closing) throw new ScreenTransportError('closed');
+      drain = callback;
+      return () => { if (drain === callback) drain = undefined; };
+    },
     load: () => request(async signal => (await backend.get(signal)).screen),
     submit: input => request(signal => backend.submit(input, signal)),
     update: input => request(signal => backend.update(input, signal)),
@@ -179,6 +186,15 @@ export function createScreenTransport(options: {
         .finally(() => subscriptions.delete(controller));
       return () => { controller.abort(); subscriptions.delete(controller); };
     },
-    dispose() { lifetime.abort(); for (const controller of subscriptions) controller.abort(); subscriptions.clear(); },
+    dispose() {
+      if (closing) return;
+      closing = true;
+      for (const controller of subscriptions) controller.abort(); subscriptions.clear();
+      if (!drain) { lifetime.abort(); return; }
+      const timeout = setTimeout(() => lifetime.abort(), 15000);
+      try {
+        void Promise.resolve(drain()).catch(() => {}).finally(() => { clearTimeout(timeout); lifetime.abort(); });
+      } catch { clearTimeout(timeout); lifetime.abort(); }
+    },
   };
 }
