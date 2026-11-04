@@ -98,7 +98,7 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     const company = companies.find(item => item.company_id === companyId);
     const choice = company ? ` Моя компания: ${company.company_name || company.tenant_name || (view?.me?.tenant_id === company.company_id && view.me.tenant_name) || company.company_id} (ID: ${company.company_id}).` : '';
     const stage = stageTitle ? ` Хочу продолжить: «${stageTitle}».` : '';
-    navigate.toCompose({ initialPrompt: `Помоги продолжить настройку svaib.${stage}${choice} Продолжим в папке текущего проекта. Локальная папка не является папкой Google Drive: подключение Drive и синхронизация не обязательны для создания пространства. Статус облачного источника не определяет готовность локальной папки.`, focusPrompt: false });
+    navigate.toCompose({ initialPrompt: `Помоги продолжить настройку svaib.${stage}${choice} Продолжим в папке текущего проекта.`, focusPrompt: false });
   }
   async function openConstructor(screenId?: string) {
     if (!companyId) return;
