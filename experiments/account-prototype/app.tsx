@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useBbContext, useBbNavigate, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useBbNavigate, useRpc, useRealtime } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './account-module';
-import type { screenRpcContract } from '../../screen-module';
 import { accountIdentity, hasCompanyMembership, type AccountView, type OnboardingView } from './contracts';
 import type { PluginNavPanelProps } from '@get-bb/plugin-sdk/app';
 import type { ConnectFlowView } from './connect-flow';
@@ -17,8 +16,6 @@ const progressCache = new Map<string, OnboardingView>();
 
 export function AccountPage({ production = false }: { production?: boolean } = {}) {
   const rpc = useRpc<typeof rpcContract>();
-  const screenRpc = useRpc<typeof screenRpcContract>();
-  const context = useBbContext();
   const navigate = useBbNavigate();
   const [view, setView] = useState<AccountView | null>(null);
   const [connection, setConnection] = useState<ConnectFlowView | null>(null);
@@ -30,8 +27,6 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [companyId, setCompanyId] = useState('');
-  const [screenChoices, setScreenChoices] = useState<{ companyId: string; items: { id: string; title: string; updatedAt: string; kind: 'overview' | 'scaffold' }[] } | null>(null);
-  const selectedCompany = useRef(companyId); selectedCompany.current = companyId;
   const [companies, setCompanies] = useState<NonNullable<NonNullable<AccountView['me']>['companies']>>([]);
   const sequence = useRef(0);
   const currentAccount = useRef<string | null | undefined>(undefined);
@@ -80,8 +75,8 @@ export function AccountPage({ production = false }: { production?: boolean } = {
   }, [rpc, companyId]);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => () => { sequence.current++; }, []);
-  useRealtime('account-changed', () => { setProgress(null); setAccountProgress(null); setScreenChoices(null); setSelectionLoaded(false); currentAccount.current = undefined; void refresh(); });
-  useEffect(() => { setScreenChoices(null); }, [companyId]);
+  useRealtime('account-changed', () => { setProgress(null); setAccountProgress(null); setSelectionLoaded(false); currentAccount.current = undefined; void refresh(); });
+  useRealtime('onboarding-invalidated', () => { void refresh(); });
   // Account marks can also change outside BB, e.g. in Telegram. Re-read when
   // the person returns to this window, without background polling.
   useEffect(() => {
@@ -107,19 +102,11 @@ export function AccountPage({ production = false }: { production?: boolean } = {
     const task = setupTasks.find(item => item.id === stepId);
     const stageTitle = task?.title || catalog.stages.find(item => item.id === stepId)?.title;
     const stage = stageTitle ? ` Хочу продолжить: «${stageTitle}».` : '';
-    navigate.toCompose({ initialPrompt: `${task?.prompt || 'Помоги продолжить настройку svaib.'}${stage}${choice} Продолжим в папке текущего проекта.`, focusPrompt: false });
-  }
-  async function openConstructor(screenId?: string) {
-    if (!companyId) return;
-    if (!context.threadId) throw new Error('Открой разговор в проекте BB и повтори открытие конструктора.');
-    const selected = companyId;
-    const name = view?.me?.tenant_name || companyId;
-    const result = await screenRpc.call('screen.openCompany', { threadId: context.threadId, companyId, companyName: name, ...(screenId ? { screenId } : {}) });
-    if (selectedCompany.current !== selected) return;
-    if (!result.ok) throw new Error(result.error.message);
-    if ('choices' in result.value) { setScreenChoices({ companyId: selected, items: result.value.choices }); return; }
-    setScreenChoices(null);
-    if (result.value.presentation !== 'tab-opened') setError('Конструктор подготовлен. Открой вкладку «Конструктор» в текущем разговоре.');
+    const marks = progress?.status === 'available' ? progress.onboarding.marks : {};
+    const firstWork = stepId === 'first-work' && marks['user.profile']?.state === 'done' &&
+      marks['user.zone']?.state === 'done' && marks['user.first-work']?.state !== 'done';
+    const prompt = firstWork ? 'Профиль и зона ответственности уже подготовлены. Помоги перейти к первой полезной задаче с партнёром svaib.' : task?.prompt;
+    navigate.toCompose({ initialPrompt: `${prompt || 'Помоги продолжить настройку svaib.'}${stage}${choice} Продолжим в папке текущего проекта.`, focusPrompt: false });
   }
   const setup = setupSteps({ accountReady: view?.state === 'connected', companySelected: !!companyId,
     accountProgress, progress });
@@ -156,12 +143,6 @@ export function AccountPage({ production = false }: { production?: boolean } = {
         {hasCompanyMembership(view.me)
           ? <p>{view.me.tenant_name || view.me.tenant_id} · {view.me.role === 'owner' ? 'Владелец' : 'Участник'}</p>
           : <p>Компания ещё не выбрана.</p>}
-        {companyId && hasCompanyMembership(view.me) && <><button type="button" className="svaib-account-button" disabled={busy} onClick={() => void act(() => openConstructor())}>Открыть конструктор пространства</button>
-          <p className="svaib-account-note">Конструктор показывает проект каркаса; содержимое папки автоматически не считывается.</p>
-          {screenChoices?.companyId === companyId && <div role="group" aria-label="Выбери конструктор"><p>Найдено несколько конструкторов. Выбери нужный:</p>
-            {screenChoices.items.map((item, index) => <button key={item.id} type="button" className="svaib-account-button" disabled={busy}
-              onClick={() => void act(() => openConstructor(item.id))}>{item.title} · {item.kind === 'overview' ? 'обзор' : 'каркас'} · {item.updatedAt.replace('T', ' ').slice(0, 16)} · {index + 1}</button>)}
-          </div>}</>}
         {companies.length > 0 && <p className="svaib-account-note">Компания определяет отображаемый путь. Привязка рабочей папки проверяется отдельно.</p>}
       </section>}
       {view.profile && <section><h2>Мой интерфейс</h2>

@@ -98,13 +98,12 @@ export async function registerAccountModule(bb: AccountModuleApi, options: Accou
   bb.onDispose(() => { disposed = true; });
   bb.events.on('thread.idle', async ({ thread }) => {
     if (disposed || thread.status !== 'idle' || thread.deletedAt || !thread.environmentId) return;
-    // Lifecycle notifications are global. Inspect no messages and publish no
-    // thread data; the signed ready view validates the actual workspace binding.
-    const view = await connection.view();
-    if (disposed || view.stage !== 'ready' || !view.binding ||
-        thread.projectId !== view.binding.projectId || thread.environmentId !== view.binding.environmentId ||
-        thread.providerId !== view.binding.providerId) return;
-    bb.realtime.publish('account-changed', null);
+    // Native MCP can update account/membership progress in any ordinary chat.
+    // Idle only invalidates the shared cabinet; fresh server data decides stages.
+    // No thread contents, binding, or historical connection receipt authorizes it.
+    if (!['codex', 'claude-code'].includes(thread.providerId) ||
+        (await account.view()).state !== 'connected' || disposed) return;
+    bb.realtime.publish('onboarding-invalidated', null);
   });
   const configure = (context: PluginAgentConfigurationContext) => connectionConfiguration(context, bb.pluginId);
   if (options.registerConfigure !== false) bb.agents.configure(configure);
