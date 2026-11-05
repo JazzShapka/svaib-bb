@@ -1,10 +1,11 @@
+import './browser-runtime';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as echarts from 'echarts/core';
 import { BarChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
 import { SVGRenderer } from 'echarts/renderers';
 import type { Block, Screen } from '../src/model';
-import { ScaffoldEditor, clearScaffoldDrafts } from './ScaffoldEditor';
+import { ScaffoldEditor, clearScaffoldDrafts, screenErrorMessage } from './ScaffoldEditor';
 import './screen.css';
 
 echarts.use([BarChart, GridComponent, TooltipComponent, LegendComponent, SVGRenderer]);
@@ -74,15 +75,33 @@ function ScreenContent({ transport, invalidate = 0, cacheKey }: { transport: Scr
   const sequence = useRef(0);
   const latest = useRef<Screen | null>(cached ?? null);
   const alive = useRef(true);
+  const writesAllowed = useRef(cached?.canEdit === true);
+  const accessEpoch = useRef(0);
+  const loadError = useRef(false);
+  const editorTransport = useMemo(() => {
+    const write = async <Input,>(operation: (input: Input) => Promise<{ screen: Screen }>, input: Input) => {
+      const epoch = accessEpoch.current;
+      const refused = () => Object.assign(new Error('Доступ к экрану изменился.'), { code: 'context_changed' });
+      if (!writesAllowed.current) throw refused();
+      const result = await operation(input);
+      if (!writesAllowed.current || epoch !== accessEpoch.current) throw refused();
+      return result;
+    };
+    return { ...transport,
+      ...(transport.update ? { update: (input: Parameters<NonNullable<ScreenTransport['update']>>[0]) => write(value => transport.update!(value), input) } : {}),
+      ...(transport.confirmScaffold ? { confirmScaffold: (input: Parameters<NonNullable<ScreenTransport['confirmScaffold']>>[0]) => write(value => transport.confirmScaffold!(value), input) } : {}),
+    };
+  }, [transport]);
   function receive(next: Screen) {
     const previous = latest.current;
     if (previous?.id === next.id && previous.revision > next.revision) return;
     const sharedChoiceChanged = previous?.id !== next.id || previous?.submission?.revision !== next.submission?.revision;
     latest.current = next;
+    writesAllowed.current = next.canEdit === true;
     rememberSnapshot(cacheKey, next);
     setScreen(next); setOnline(true);
     const ids = new Set(next.document.blocks.flatMap(block => block.type === 'tasks' ? block.items.map(task => task.id) : []));
-    setSelected(current => new Set((sharedChoiceChanged ? next.submission?.selectedIds ?? [] : [...current]).filter(id => ids.has(id))));
+    setSelected(current => new Set((sharedChoiceChanged || next.canEdit !== true ? next.submission?.selectedIds ?? [] : [...current]).filter(id => ids.has(id))));
   }
   const load = async () => {
     const current = ++sequence.current;
@@ -90,49 +109,61 @@ function ScreenContent({ transport, invalidate = 0, cacheKey }: { transport: Scr
       const next = await transport.load();
       if (!alive.current || current !== sequence.current) return;
       receive(next);
-    } catch (cause) { if (alive.current && current === sequence.current) { setOnline(false); setError(String((cause as Error).message)); } }
+      if (loadError.current) { loadError.current = false; setError(''); }
+    } catch (cause) {
+      if (alive.current && current === sequence.current) {
+        loadError.current = true; setOnline(false); setError(screenErrorMessage(cause));
+        if (['not_found', 'permission_denied', 'unauthorized', 'context_changed'].includes((cause as {code?: string})?.code ?? '')) {
+          writesAllowed.current = false; ++accessEpoch.current; latest.current = null;
+          if (cacheKey) { snapshots.delete(cacheKey); clearScaffoldDrafts(cacheKey); }
+          setSelected(new Set()); setScreen(null);
+        }
+      }
+    }
   };
   useEffect(() => {
-    alive.current = true; latest.current = cached ?? null; setScreen(cached ?? null);
-    setSelected(new Set(cached?.submission?.selectedIds ?? [])); setError(''); void load();
+    alive.current = true; latest.current = cached ?? null; writesAllowed.current = cached?.canEdit === true; setScreen(cached ?? null);
+    setSelected(new Set(cached?.submission?.selectedIds ?? [])); loadError.current = false; setError(''); void load();
     const unsubscribe = transport.subscribe?.(() => void load());
     return () => { alive.current = false; ++sequence.current; unsubscribe?.(); };
   }, [transport]);
   useEffect(() => { if (invalidate) void load(); }, [invalidate]);
   const owners = useMemo(() => screen ? [...new Set(screen.document.blocks.flatMap(block => block.type === 'tasks' ? block.items.map(task => task.owner) : []))] : [], [screen]);
   async function submit() {
-    if (!screen || busy) return;
-    setBusy(true); setError('');
+    if (!screen || screen.canEdit !== true || !writesAllowed.current || busy) return;
+    setBusy(true); loadError.current = false; setError('');
+    const epoch = accessEpoch.current;
     try {
       const result = await transport.submit({ id: screen.id, expectedRevision: screen.revision, requestId: crypto.randomUUID(), selectedIds: [...selected] });
-      if (alive.current) receive(result.screen);
-    } catch (cause) { if (alive.current) { setError((cause as Error).message); void load(); } }
+      if (alive.current && epoch === accessEpoch.current && writesAllowed.current) receive(result.screen);
+    } catch (cause) { if (alive.current) { loadError.current = false; setError(screenErrorMessage(cause)); void load(); } }
     finally { if (alive.current) setBusy(false); }
   }
   if (!screen) return <section className="sv-screen"><p role="status">{error || 'Открываю экран…'}</p>{error && <button onClick={() => void load()}>Повторить</button>}</section>;
   const onlyBlock = screen.document.blocks.length === 1 ? screen.document.blocks[0] : null;
   if (onlyBlock?.type === 'scaffold') return <main data-screen-id={screen.id} data-revision={screen.revision}>
-    <ScaffoldEditor block={onlyBlock} screen={screen} transport={transport} receive={receive} cacheKey={cacheKey && `${cacheKey}:${onlyBlock.id}`} />
+    {error && <p role="alert" className="screen-error">{error}</p>}
+    <ScaffoldEditor block={onlyBlock} screen={screen} transport={editorTransport} receive={receive} cacheKey={cacheKey && `${cacheKey}:${onlyBlock.id}`} />
   </main>;
   return <main className="sv-screen" data-screen-id={screen.id} data-revision={screen.revision}>
-    <header className="screen-header"><div><span className="screen-eyebrow">svaib · Screen · локальный пилот</span><h1>{screen.document.title}</h1><p>{screen.document.description}</p></div>
-      <span className="screen-revision">Ревизия {screen.revision} · {online ? 'подключён' : 'нет связи'}</span></header>
+    <header className="screen-header"><div><span className="screen-eyebrow">svaib · Screen</span><h1>{screen.document.title}</h1><p>{screen.document.description}</p></div>
+      <span className="screen-connection">{online ? 'Подключён' : 'Нет связи'}</span></header>
     <div className="screen-toolbar">{owners.length > 0 && <label>Ответственный <select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">Все</option>{owners.map(owner => <option key={owner}>{owner}</option>)}</select></label>}
       <button className="screen-secondary" onClick={() => { setError(''); void load(); }}>Обновить</button></div>
     {error && <p role="alert" className="screen-error">{error}</p>}
     <div className={`screen-blocks screen-${screen.document.layout}`}>
       {screen.document.blocks.map(block => <section key={block.id} className={`screen-card screen-block-${block.type}`} data-block-id={block.id}><h2>{block.title}</h2>
         {block.type === 'note' ? <p className="screen-note-text">{block.text}</p> : block.type === 'chart' ? <Chart block={block} /> : block.type === 'scaffold' ?
-          <ScaffoldEditor block={block} screen={screen} transport={transport} receive={receive} cacheKey={cacheKey && `${cacheKey}:${block.id}`} /> :
+          <ScaffoldEditor block={block} screen={screen} transport={editorTransport} receive={receive} cacheKey={cacheKey && `${cacheKey}:${block.id}`} /> :
           <ul className="screen-tasks">{block.items.filter(task => filter === 'all' || task.owner === filter).map(task => <li key={task.id}>
-            <label><input type="checkbox" aria-label={`Выбрать: ${task.title}`} checked={selected.has(task.id)} onChange={() => setSelected(previous => { const next = new Set(previous); next.has(task.id) ? next.delete(task.id) : next.add(task.id); return next; })} />
+            <label><input type="checkbox" aria-label={`Выбрать: ${task.title}`} disabled={screen.canEdit !== true} checked={selected.has(task.id)} onChange={() => { if (screen.canEdit === true) setSelected(previous => { const next = new Set(previous); next.has(task.id) ? next.delete(task.id) : next.add(task.id); return next; }); }} />
               <span><strong>{task.title}</strong><small>{task.owner} · {({ active: 'В работе', backlog: 'Отложено', done: 'Сделано' })[task.status]}</small><small className="screen-source">{task.source.title}<br /><code>{task.source.ref}</code></small></span></label>
           </li>)}</ul>}
       </section>)}
     </div>
     {screen.document.blocks.some(block => block.type === 'tasks') && <footer className="screen-submit"><div><strong>Выбрано: {selected.size}</strong><p>Передаём выбор партнёру. Статусы задач в источниках не меняются.</p></div>
-      <button onClick={() => void submit()} disabled={busy}>{busy ? 'Сохраняю…' : 'Передать выбранное агенту'}</button>
-      {screen.submission && <p role="status" className="screen-saved">Выбор сохранён: {screen.submission.selectedIds.length} · ревизия {screen.submission.revision}. Если агент не продолжил, попросите его забрать результат.</p>}
+      {screen.canEdit === true && <button onClick={() => void submit()} disabled={busy}>{busy ? 'Сохраняю…' : 'Передать выбранное агенту'}</button>}
+      {screen.submission && <p role="status" className="screen-saved">Выбор сохранён: {screen.submission.selectedIds.length}. Если агент не продолжил, попросите его забрать результат.</p>}
     </footer>}
   </main>;
 }

@@ -10,17 +10,15 @@ export const treeItemSchema = z.object({
   template: z.string().nullable(), screenKind: z.string().max(30).nullable(),
 }).strict();
 export const treeConfigSchema = z.object({ schemaVersion: z.literal(2), catalogVersion: z.string(), canonSnapshot: z.string(), companyName: z.string().min(1).max(100),
-  overview: z.object({ sourceHash: z.string().regex(/^[0-9a-f]{64}$/), maxDepth: z.number().int().positive(), omittedBranches: z.number().int().nonnegative(), omittedItems: z.number().int().nonnegative(), reservedPaths: z.array(z.string().min(1).max(2000)).max(600) }).strict().optional(),
+  overview: z.object({ sourceHash: z.string().regex(/^[0-9a-f]{64}$/), capturedAt: z.iso.datetime().optional(), maxDepth: z.number().int().positive(), omittedBranches: z.number().int().nonnegative(), omittedItems: z.number().int().nonnegative(), reservedPaths: z.array(z.string().min(1).max(2000)).max(600) }).strict().optional(),
   tree: z.array(treeItemSchema).min(1).max(700) }).strict().superRefine((config, ctx) => {
   const issue = (message: string) => ctx.addIssue({ code: 'custom', message });
-  if (config.catalogVersion !== manifest.version || config.canonSnapshot !== manifest.canonSnapshot) issue('Каталог изменился; нужна сверка с установленной поставкой.');
   const nodes = new Map(config.tree.map(item => [item.id, item]));
   if (nodes.size !== config.tree.length) issue('ID элементов должны быть уникальны.');
   const roots = config.tree.filter(item => item.parentId === null);
   if (roots.length !== 1 || roots[0]?.id !== 'root' || roots[0]?.type !== 'folder' || !roots[0]?.locked) issue('У дерева должен быть один защищённый корень-папка с ID root.');
   const siblings = new Set<string>();
   for (const node of config.tree) {
-    if (node.template && !manifest.templates.some(file => file.path === node.template)) issue('Шаблон отсутствует в каталоге.');
     const parent = node.parentId ? nodes.get(node.parentId) : null;
     if (node.parentId && (!parent || parent.type !== 'folder')) issue('Родитель должен быть существующей папкой.');
     const sibling = `${node.parentId}/${node.name}`;
@@ -68,7 +66,7 @@ export function planTree(config: TreeConfig) {
   const nodes = new Map(config.tree.map(item => [item.id, item]));
   function path(node: TreeItem): string { const parent = node.parentId ? nodes.get(node.parentId)! : null; return parent ? [path(parent), node.name].filter(Boolean).join('/') : ''; }
   const files = config.tree.filter(item => item.parentId && item.type === 'file').map(item => ({ path: path(item), template: item.template,
-    templateSha256: manifest.templates.find(file => file.path === item.template)?.sha256 ?? null, subject: config.companyName, purpose: item.note }));
+    templateSha256: config.catalogVersion === manifest.version && config.canonSnapshot === manifest.canonSnapshot ? manifest.templates.find(file => file.path === item.template)?.sha256 ?? null : null, subject: config.companyName, purpose: item.note }));
   const directories = config.tree.filter(item => item.parentId && item.type === 'folder').map(item => ({ path: path(item), subject: config.companyName, purpose: item.note }));
   return { schemaVersion: 1 as const, catalogVersion: config.catalogVersion, canonSnapshot: config.canonSnapshot, companyName: config.companyName, files, directories,
     agentSteps: ['Это согласованный проект структуры, а не разрешение заменять существующие файлы. Получить корень и проверить space-scaffold readiness.',

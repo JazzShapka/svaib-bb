@@ -21,7 +21,6 @@ export const semanticScaffoldConfigSchema = z.object({
   extras: z.array(z.object({ ownerId: z.string().min(1).max(50), kind: z.enum(['strategic', 'team', 'metrics', 'projects', 'processes', 'knowledge', 'inbox', 'private', 'meetings', 'archive', 'docs', 'contracts', 'drafts']), slug: key.optional() }).strict()).max(160).optional(),
 }).strict().superRefine((config, ctx) => {
   const issue = (message: string) => ctx.addIssue({ code: 'custom', message });
-  if (config.catalogVersion !== manifest.version || config.canonSnapshot !== manifest.canonSnapshot) issue('Каталог изменился: агент должен пересобрать план по текущей поставке.');
   const nodes = new Map(config.nodes.map(node => [node.id, node]));
   if (nodes.size !== config.nodes.length || nodes.has('root') || nodes.has('company')) issue('ID объектов должны быть уникальны; root и company зарезервированы.');
   const reserved = new Set(['01-company', 'company', 'projects', 'processes', 'knowledge', 'readme', 'agents', 'claude', 'source', 'extractors', 'meetings']);
@@ -66,7 +65,7 @@ export type ScaffoldPlan = { schemaVersion: 1; catalogVersion: string; canonSnap
 export const scaffoldConfirmationSchema = z.object({ blockId: z.string(), documentRevision: z.number().int().positive(), revision: z.number().int().positive(), at: z.iso.datetime(),
   planHash: z.string(), config: scaffoldConfigSchema, plan: z.object({ schemaVersion: z.literal(1), catalogVersion: z.string(), canonSnapshot: z.string(), companyName: z.string(),
     directories: z.array(z.object({ path: z.string(), subject: z.string(), purpose: z.string() }).strict()).optional(),
-    files: z.array(z.object({ path: z.string(), template: z.string().nullable(), templateSha256: z.string().nullable(), subject: z.string(), purpose: z.string() }).strict()), agentSteps: z.array(z.string()) }).strict() }).strict();
+    files: z.array(z.object({ path: z.string(), template: z.string().nullable(), templateSha256: z.string().nullable(), subject: z.string(), purpose: z.string() }).strict()), agentSteps: z.array(z.string()) }).strict().nullable() }).strict();
 export type ScaffoldConfirmation = z.infer<typeof scaffoldConfirmationSchema>;
 export const scaffoldCatalog = { version: manifest.version, canonSnapshot: manifest.canonSnapshot, kit: kitLabels, strategicFiles: strategicLabels };
 const kitFiles = { overview: '01_overview.md', active: '02_active.md', backlog: '03_backlog.md', progress: '04_progress.md', decisions: '05_decisions.md' };
@@ -80,7 +79,7 @@ export function planScaffold(input: unknown): ScaffoldPlan {
     if (template && !found) throw new Error(`Шаблон отсутствует в поставке: ${template}`);
     const existing = files.get(path);
     if (existing) throw new Error(`Два назначения одного пути: ${path}`);
-    files.set(path, { path, template, templateSha256: found?.sha256 ?? null, subject, purpose });
+    files.set(path, { path, template, templateSha256: config.catalogVersion === manifest.version && config.canonSnapshot === manifest.canonSnapshot ? found?.sha256 ?? null : null, subject, purpose });
   }
   for (const item of manifest.templates.filter(item => item.path.startsWith('templates/root/'))) {
     const path = item.path.slice('templates/root/'.length);
@@ -146,7 +145,7 @@ export function planScaffold(input: unknown): ScaffoldPlan {
     const parts = file.path.split('/'); parts.pop();
     while (parts.length) { const path = parts.join('/'); if (!directories.has(path)) directories.set(path, { path, subject: file.subject, purpose: 'Папка каркаса' }); parts.pop(); }
   }
-  return { schemaVersion: 1, directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path, 'en')), catalogVersion: manifest.version, canonSnapshot: manifest.canonSnapshot, companyName: config.companyName,
+  return { schemaVersion: 1, directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path, 'en')), catalogVersion: config.catalogVersion, canonSnapshot: config.canonSnapshot, companyName: config.companyName,
     files: [...files.values()].sort((a, b) => a.path.localeCompare(b.path, 'en')),
     agentSteps: ['Получить объявленный пользователем корень пространства и проверить его через space-scaffold readiness.',
       'Сверить версию, отпечаток канона и SHA-256 используемых шаблонов с установленной поставкой.',

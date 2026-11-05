@@ -51,7 +51,8 @@
     "./model": "./src/model.ts",
     "./renderer": "./ui/ScreenRenderer.tsx",
     "./scaffold": "./src/scaffold.ts",
-    "./agent-session": "./src/agent-session.ts"
+    "./agent-session": "./src/agent-session.ts",
+    "./scaffold-import": "./src/scaffold-import.ts"
   },
   "files": [
     "bb",
@@ -64,12 +65,14 @@
     "src/scaffold-tree-model.ts",
     "src/scaffold-catalog.json",
     "ui/ScreenRenderer.tsx",
+    "ui/browser-runtime.ts",
     "ui/ScaffoldEditor.tsx",
     "ui/scaffold-tree.ts",
     "ui/raw.d.ts",
     "ui/screen.css",
     "ui/scaffold-source.json",
     "ui/scaffold-site.css",
-    "src/agent-session.ts"
+    "src/agent-session.ts",
+    "src/scaffold-import.ts"
   ]
 }

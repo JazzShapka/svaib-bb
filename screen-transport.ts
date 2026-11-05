@@ -36,7 +36,7 @@ export interface ScreenBackendPort {
 export const screenSnapshotSchema = z.object({ screen: screenSchema, cursor: z.number().int().positive() }).strict();
 const eventSchema = z.object({
   seq: z.number().int().positive(), revision: z.number().int().positive(), at: z.iso.datetime(),
-  type: z.enum(['created', 'updated', 'submitted', 'scaffold-confirmed']),
+  type: z.enum(['created', 'updated', 'submitted', 'scaffold-confirmed', 'cleared']),
   selectedIds: z.array(idSchema).optional(), confirmation: screenSchema.shape.scaffoldConfirmation.unwrap().unwrap().optional(),
 }).strict();
 export const screenEventsSchema = screenSnapshotSchema.extend({ events: z.array(eventSchema).max(512),

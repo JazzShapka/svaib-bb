@@ -5,7 +5,6 @@
 .svaib-journey-intro { margin: 8px 0 18px !important; opacity: .75; }
 .svaib-journey-list, .svaib-journey-next-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
 .svaib-journey-step { display: flex; align-items: flex-start; gap: 13px; padding: 14px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 10px; }
-.svaib-journey-step--done { padding-block: 8px; }
 .svaib-journey-step--current { border-color: #00a99b; background: color-mix(in srgb, #00b4a6 7%, transparent); }
 .svaib-journey-number { flex: 0 0 28px; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 50%; font-size: 13px; font-weight: 700; }
 .svaib-journey-step--done .svaib-journey-number { color: #007c72; border-color: #00a99b; }

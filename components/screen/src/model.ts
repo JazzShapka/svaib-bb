@@ -20,7 +20,7 @@ export const blockSchema = z.discriminatedUnion('type', [
 ]);
 export const documentSchema = z.object({
   schemaVersion: z.literal(1), title: text, description: text,
-  layout: z.enum(['stack', 'columns']), blocks: z.array(blockSchema).min(1).max(20),
+  layout: z.enum(['stack', 'columns']), blocks: z.array(blockSchema).max(20),
 }).strict().superRefine((document, ctx) => {
   const blockIds = document.blocks.map(block => block.id);
   const taskIds = document.blocks.flatMap(block => block.type === 'tasks' ? block.items.map(task => task.id) : []);
@@ -35,17 +35,19 @@ export const documentSchema = z.object({
 export type ScreenDocument = z.infer<typeof documentSchema>;
 export type Block = z.infer<typeof blockSchema>;
 export const requestIdSchema = z.string().regex(/^[a-zA-Z0-9-]{1,100}$/);
-export const createSchema = z.object({ id: idSchema, requestId: requestIdSchema, document: documentSchema }).strict();
+export const createSchema = z.object({ id: idSchema, requestId: requestIdSchema, document: documentSchema,
+  onlyIfEmpty: z.boolean().optional() }).strict();
 export const updateSchema = z.object({ id: idSchema, requestId: requestIdSchema,
-  expectedRevision: z.number().int().positive(), document: documentSchema }).strict();
+  expectedRevision: z.number().int().positive(), document: documentSchema,
+  refreshOverview: z.literal(true).optional() }).strict();
 export const submitSchema = z.object({ id: idSchema, requestId: requestIdSchema,
   expectedRevision: z.number().int().positive(), selectedIds: z.array(idSchema).max(200) }).strict();
 export const confirmScaffoldSchema = z.object({ id: idSchema, requestId: requestIdSchema, expectedRevision: z.number().int().positive(), blockId: idSchema }).strict();
-export type ScreenEvent = { seq: number; type: 'created' | 'updated' | 'submitted' | 'scaffold-confirmed';
+export type ScreenEvent = { seq: number; type: 'created' | 'updated' | 'submitted' | 'scaffold-confirmed' | 'cleared';
   revision: number; at: string; selectedIds?: string[]; confirmation?: ScaffoldConfirmation };
-export type Screen = { id: string; revision: number; document: ScreenDocument;
+export type Screen = { id: string; revision: number; document: ScreenDocument; canEdit?: boolean;
   updatedAt: string; submission: { selectedIds: string[]; revision: number; at: string } | null; scaffoldConfirmation?: ScaffoldConfirmation | null };
-export const screenSchema = z.object({ id: idSchema, revision: z.number().int().positive(), document: documentSchema,
+export const screenSchema = z.object({ id: idSchema, revision: z.number().int().positive(), document: documentSchema, canEdit: z.boolean().default(false),
   updatedAt: z.iso.datetime(), submission: z.object({ selectedIds: z.array(idSchema), revision: z.number().int().positive(), at: z.iso.datetime() }).nullable(), scaffoldConfirmation: scaffoldConfirmationSchema.nullable().optional() }).strict();
 export type Mutation = { screen: Screen; appliedRevision: number; event: ScreenEvent; replayed: boolean };
 export type EventPage = { events: ScreenEvent[]; cursor: number; screen: Screen; historyStart: number; truncated: boolean };
@@ -53,6 +55,7 @@ export type EventPage = { events: ScreenEvent[]; cursor: number; screen: Screen;
 export const catalog = {
   schemaVersion: 1,
   overviewVersion: 1,
+  overviewRefreshVersion: 1,
   components: [
     { type: 'note', version: 1, description: 'Текстовое пояснение' },
     { type: 'tasks', version: 1, description: 'Задачи, локальный фильтр и выбор для передачи агенту' },
